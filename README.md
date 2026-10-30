@@ -3,8 +3,9 @@
 ## Personal TestFlight fork
 
 This public fork preserves the personal iPhone/iPad build on `personal/testflight`;
-`testflight-pre-upstream` tags the saved pre-update source. Upstream integration is
-kept separately on `update/upstream-master`. See [the personal TestFlight guide](docs/TestFlight.md)
+`testflight-pre-upstream` tags the saved pre-update source. Upstream updates are
+verified on `update/upstream-master` before promotion to the personal release branch.
+See [the personal TestFlight guide](docs/TestFlight.md)
 for this fork's signing, Firebase-free setup, release history, and Git workflow.
 The general upstream instructions below do not override that personal setup.
 

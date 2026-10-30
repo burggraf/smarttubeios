@@ -60,7 +60,7 @@ provisioning profiles. The shared container is used by the app and Share Extensi
 
 ## Upstream integration release — 2026-10-30
 
-Candidate: **5.6 (1793375185)**, based on upstream `6bd85d3` with the personal
+Uploaded build: **5.6 (1793375185)**, based on upstream `6bd85d3` with the personal
 signing identity, shared container, foreground sign-in fix, and disabled Firebase
 reporting preserved. The new Home Screen widget shares the same personal app group.
 
@@ -94,7 +94,14 @@ SHA-256: `b555e59ce59adebdeb13efad653f6645251e63ef24bfc85862d147103d471401`.
 Raw initial failures, crash report, regression runs, CI output, and signed-build
 logs are preserved locally in `DerivedData/UpstreamUpdate/` (gitignored).
 
-Upload status: verified candidate prepared; not uploaded yet.
+Source: merge commit `4e4573c`, tagged `testflight-5.6-1793375185`.
+
+Apple accepted the upload with **no errors** on 2026-10-30.
+Delivery UUID: `4e4728d6-999b-4eb5-b9ae-ede2e92371df`.
+The follow-up App Store Connect query confirms `is-on-app-store-connect: true`,
+`build-status: VALID_BINARY`, iPhone/iPad support, and no non-exempt encryption.
+Its import state is still `PROCESSING`; tester availability is not yet confirmed.
+Upload and processing responses are retained locally alongside the build evidence.
 
 ## Build and upload
 
