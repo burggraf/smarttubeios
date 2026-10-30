@@ -13,6 +13,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
     def test_personal_build_has_no_firebase_startup_or_upload(self):
         source = (APP / "Sources/AppEntry.swift").read_text()
         self.assertNotIn("FirebaseApp.configure()", source)
+        self.assertIn("CrashlyticsLogger.isEnabled = false", source)
         project = plistlib.loads(subprocess.check_output([
             "plutil", "-convert", "xml1", "-o", "-",
             str(APP / "SmartTubeApp.xcodeproj/project.pbxproj"),
@@ -46,11 +47,13 @@ class ReleaseConfigurationTests(unittest.TestCase):
                 self.assertEqual(settings["PRODUCT_BUNDLE_IDENTIFIER"], expected[target["name"]])
                 self.assertEqual(settings["DEVELOPMENT_TEAM"], "HEGN9W2S9J")
                 self.assertEqual(settings["TARGETED_DEVICE_FAMILY"], "1,2")
-        for path in ["SmartTubeApp/SmartTubeApp.entitlements", "ShareExtension/SmartTubeShareExtension.entitlements"]:
+        for path in ["SmartTubeApp/SmartTubeApp.entitlements", "ShareExtension/SmartTubeShareExtension.entitlements", "DownloadWidget/SmartTubeDownloadWidget.entitlements"]:
             entitlements = plistlib.loads((APP / path).read_bytes())
             self.assertEqual(entitlements["com.apple.security.application-groups"], ["group.com.dmarie.smarttube"])
+        store = ROOT / "SmartTubeIOS/Sources/SmartTubeIOSCore/HomeWidgetSnapshot.swift"
+        self.assertIn('public static let appGroup = "group.com.dmarie.smarttube"', store.read_text())
         for path in ["Sources/AppEntry.swift", "ShareExtension/ShareViewController.swift"]:
-            self.assertIn('"group.com.dmarie.smarttube"', (APP / path).read_text())
+            self.assertIn("private static let appGroup = HomeWidgetStore.appGroup", (APP / path).read_text())
         entitlements = plistlib.loads((APP / "SmartTubeApp/SmartTubeApp.entitlements").read_bytes())
         self.assertEqual(entitlements["com.apple.developer.ubiquity-kvstore-identifier"], "$(TeamIdentifierPrefix)com.dmarie.smarttube")
 

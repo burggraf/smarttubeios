@@ -1,21 +1,13 @@
 import Foundation
 import Testing
+
 @testable import SmartTubeIOSCore
 
 // MARK: - FEShortsClientRegressionTests
 //
-// Regression tests for task #96: fetchShorts and fetchShortsMore must use the
-// TVHTML5 client context, not the WEB client context, when making authenticated
-// InnerTube browse requests.
-//
-// Root cause: the device-code OAuth token is bound to TVHTML5. When the WEB
-// client body is sent with this token, YouTube returns HTTP 400. All other auth
-// endpoints correctly use tvClientContext; fetchShorts and fetchShortsMore had
-// a regression that switched them to webClientContext, causing Shorts to show
-// no videos on cold launch.
-//
-// These tests intercept the outgoing URLRequest via URLProtocol and verify the
-// JSON body contains `"clientName": "TVHTML5"` — not `"WEB"`.
+// FEshorts was retired upstream: the initial feed and srch: continuations now use
+// anonymous WEB search. TV device-code OAuth tokens must never be sent with WEB
+// requests; legacy unprefixed continuation tokens still try authenticated TV browse.
 
 // MARK: - URLProtocol helper
 
@@ -24,6 +16,7 @@ import Testing
 private final class BodyCapturingURLProtocol: URLProtocol, @unchecked Sendable {
 
     nonisolated(unsafe) static var capturedBody: Data?
+    nonisolated(unsafe) static var capturedRequest: URLRequest?
 
     override class func canInit(with request: URLRequest) -> Bool {
         request.httpMethod == "POST"
@@ -34,10 +27,9 @@ private final class BodyCapturingURLProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         // URLSession converts httpBody to httpBodyStream before handing the request
         // to URLProtocol; httpBody is always nil here.
-        // Only capture the FIRST request — fetchShorts falls back to a second search
-        // request when the primary browse fails, and we must not let it overwrite
-        // the FEshorts browse body we already captured.
+        // Keep the first request so legacy continuation fallbacks cannot overwrite it.
         if BodyCapturingURLProtocol.capturedBody == nil {
+            BodyCapturingURLProtocol.capturedRequest = request
             if let stream = request.httpBodyStream {
                 stream.open()
                 var body = Data()
@@ -78,7 +70,7 @@ private final class BodyCapturingURLProtocol: URLProtocol, @unchecked Sendable {
 
 // MARK: - Tests
 
-@Suite("FEshorts uses TV client — Regression #96", .serialized)
+@Suite("Shorts search and legacy TV authentication — Regression #96", .serialized)
 struct FEShortsClientRegressionTests {
 
     // MARK: - Helpers
@@ -94,13 +86,10 @@ struct FEShortsClientRegressionTests {
 
     // MARK: - fetchShorts
 
-    /// Verifies that fetchShorts sends `clientName: "TVHTML5"` when authenticated.
-    ///
-    /// Before the fix, this was `"WEB"`, causing YouTube to reject the request
-    /// with HTTP 400 because the device-code OAuth token is bound to TVHTML5.
-    @Test("fetchShorts sends TVHTML5 clientName when authenticated")
-    func fetchShortsSendsTVClientWhenAuthenticated() async throws {
+    @Test("fetchShorts uses filtered WEB search without leaking the TV OAuth token")
+    func fetchShortsUsesAnonymousSearch() async throws {
         BodyCapturingURLProtocol.capturedBody = nil
+        BodyCapturingURLProtocol.capturedRequest = nil
         let api = makeTestAPI(authToken: "fake-tv-oauth-token")
 
         // The call will throw (HTTP 400 from BodyCapturingURLProtocol), which is expected.
@@ -118,14 +107,32 @@ struct FEShortsClientRegressionTests {
         let context = json["context"] as? [String: Any]
         let clientDict = context?["client"] as? [String: Any]
 
-        #expect(
-            clientDict?["clientName"] as? String == "TVHTML5",
-            """
-            fetchShorts must use TVHTML5 client when authenticated.
-            Sending a device-code OAuth token with clientName="WEB" returns HTTP 400.
-            Found clientName=\(String(describing: clientDict?["clientName"]))
-            """
-        )
+        let request = try #require(BodyCapturingURLProtocol.capturedRequest)
+        #expect(request.url?.path == "/youtubei/v1/search")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(clientDict?["clientName"] as? String == "WEB")
+        #expect(json["query"] as? String == "#shorts")
+        #expect(json["params"] as? String == SearchFilter(duration: .short).encodedParams())
+        #expect(json["browseId"] == nil, "The retired FEshorts endpoint must not be retried")
+    }
+
+    @Test("Search continuations strip their routing prefix and remain anonymous")
+    func searchContinuationUsesAnonymousSearch() async throws {
+        BodyCapturingURLProtocol.capturedBody = nil
+        BodyCapturingURLProtocol.capturedRequest = nil
+        let api = makeTestAPI(authToken: "fake-tv-oauth-token")
+
+        _ = try? await api.fetchShortsMore(continuationToken: "srch:search-next-page")
+
+        let body = try #require(BodyCapturingURLProtocol.capturedBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let request = try #require(BodyCapturingURLProtocol.capturedRequest)
+        let context = json["context"] as? [String: Any]
+        let client = context?["client"] as? [String: Any]
+        #expect(request.url?.path == "/youtubei/v1/search")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(client?["clientName"] as? String == "WEB")
+        #expect(json["continuation"] as? String == "search-next-page")
     }
 
     // MARK: - fetchShortsMore
@@ -134,9 +141,10 @@ struct FEShortsClientRegressionTests {
     ///
     /// Continuation tokens are client-scoped: a token from a TVHTML5 FEshorts
     /// response must be submitted with TVHTML5 context to work correctly.
-    @Test("fetchShortsMore sends TVHTML5 clientName")
+    @Test("Legacy fetchShortsMore tokens still use TVHTML5 clientName")
     func fetchShortsMoreSendsTVClient() async throws {
         BodyCapturingURLProtocol.capturedBody = nil
+        BodyCapturingURLProtocol.capturedRequest = nil
         let api = makeTestAPI(authToken: "fake-tv-oauth-token")
 
         _ = try? await api.fetchShortsMore(continuationToken: "test-continuation-token-12345")
@@ -164,5 +172,8 @@ struct FEShortsClientRegressionTests {
             json["continuation"] as? String == "test-continuation-token-12345",
             "fetchShortsMore must forward the continuation token in the body"
         )
+        let request = try #require(BodyCapturingURLProtocol.capturedRequest)
+        #expect(request.url?.path == "/youtubei/v1/browse")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fake-tv-oauth-token")
     }
 }

@@ -2,6 +2,49 @@
 
 This fork's iOS scheme is **SmartTube** (not the separate **Smart Tube** Apple TV scheme).
 
+## Repository and safe updates
+
+Public fork: https://github.com/burggraf/smarttubeios.
+
+- `origin`: `burggraf/smarttubeios`, where personal work is pushed.
+- `upstream`: `milika/SmartTubeIOS`, the actively maintained parent project.
+- `original`: `ikeval/smarttubeios`, the original clone source (itself a fork).
+- `personal/testflight`: personal release branch and the fork's default branch.
+- `testflight-pre-upstream`: immutable pre-update recovery tag at `020b3e7`.
+- `update/upstream-master`: separate integration of upstream `6bd85d3` (184 new commits).
+
+Commit local work before any future update, then fetch and merge on a new branch:
+
+```bash
+git switch personal/testflight
+git fetch upstream
+git switch -c update/upstream-YYYYMMDD
+git merge upstream/master
+```
+
+Resolve conflicts and verify the personal configuration, full test suite, and iOS
+archive before promoting an update to `personal/testflight`. Do not use GitHub's
+Sync fork action as a substitute for merging and checking the personal changes.
+The upstream `master` branch on the fork is not the personal release branch.
+
+To return to the personal release branch with a clean working tree:
+
+```bash
+git switch personal/testflight
+```
+
+The recovery tag also remains available if that branch advances later:
+
+```bash
+git switch -c recovery/testflight testflight-pre-upstream
+```
+
+Existing signed archives, IPAs, credentials, and raw logs remain local and ignored;
+they are not part of the public backup. Deployment and test records below describe
+the original 4.6 builds unless explicitly labeled as upstream-integration checks.
+
+## Personal release identity
+
 - Apple Developer team: **Mantis Bible Company**, `HEGN9W2S9J`
 - Bundle ID: `com.dmarie.smarttube`
 - App Store Connect name: **SmartTube Personal**
@@ -14,6 +57,44 @@ This fork's iOS scheme is **SmartTube** (not the separate **Smart Tube** Apple T
 The app, Share Extension, Safari Extension, and download Live Activity widget use
 matching identifiers under the new bundle ID. Automatic signing manages their
 provisioning profiles. The shared container is used by the app and Share Extension.
+
+## Upstream integration release — 2026-10-30
+
+Candidate: **5.6 (1793375185)**, based on upstream `6bd85d3` with the personal
+signing identity, shared container, foreground sign-in fix, and disabled Firebase
+reporting preserved. The new Home Screen widget shares the same personal app group.
+
+- Fixed the upstream native-macOS window-ready callback and PNG snapshot compile errors.
+- Fixed a disk-cache read-after-write race by reading on the existing serial write
+  queue. The new regression failed before the fix, then all 10 disk-cache tests passed.
+- Replaced timing guesses in the failing subscription/feed tests with readiness
+  checks, serialized only the integration suites sharing the playback queue, and
+  serialized the RSS fixture whose static routes were being overwritten concurrently.
+- Corrected stale Shorts assertions to the existing native-controls/search contracts;
+  added URL-builder parity and anonymous WEB request/TV OAuth separation checks.
+  The legacy authenticated TV continuation assertions remain and were strengthened.
+- Two complete `just test-unit` parallel runs each passed **991 tests in 145 suites**.
+  Full raw output is retained in `DerivedData/UpstreamUpdate/release-parallel-{1,2}-raw.log`,
+  before the upstream recipe's output truncation.
+- Release configuration (2 tests), shell syntax, `just format-check`, `just secrets-check`,
+  and `just doc-links` pass. `just` and SwiftLint were installed with operator approval.
+- **CI is not fully green:** `just ci` stops at SwiftLint with **183 violations**;
+  pristine upstream reports **175** with the same tool. The remaining differences
+  include moved legacy fixture lines and changed size metrics, not a reset baseline.
+  The operator explicitly approved documenting the existing lint debt without a
+  repository-wide lint refactor. No rules, baseline, or security assertions were weakened.
+- Signed archive/export succeeded. The exported IPA passed ZIP integrity, strict
+  signatures, all four App Store identities/profiles/versions, iPhone/iPad support,
+  app-group and iCloud entitlements, and absence of Firebase configuration.
+- Simulator UI suites and real-device playback/sign-in for this new build are not
+  verified; use TestFlight for device acceptance testing.
+
+IPA: `DerivedData/TestFlight/export-1793375185/SmartTube.ipa`.
+SHA-256: `b555e59ce59adebdeb13efad653f6645251e63ef24bfc85862d147103d471401`.
+Raw initial failures, crash report, regression runs, CI output, and signed-build
+logs are preserved locally in `DerivedData/UpstreamUpdate/` (gitignored).
+
+Upload status: verified candidate prepared; not uploaded yet.
 
 ## Build and upload
 

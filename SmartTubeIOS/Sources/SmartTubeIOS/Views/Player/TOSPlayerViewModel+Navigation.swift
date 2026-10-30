@@ -43,15 +43,45 @@ extension TOSPlayerViewModel {
                 guard count > 0 else { return }
                 let nextIdx = (idx + 1) % count
                 guard let next = await CurrentQueueStore.shared.videoAt(index: nextIdx) else { return }
-                tosLog.notice("[navigation] playNext (queue) — index=\(nextIdx)/\(count) id=\(next.id, privacy: .public)")
+                tosLog.notice(
+                    "[navigation] playNext (queue) — index=\(nextIdx)/\(count) id=\(next.id, privacy: .public)")
                 onPlayNext?(next)
             }
             return
         }
-        tosLog.notice("[navigation] playNext called — relatedVideos=\(self.relatedVideos.count) hasNext=\(self.hasNext)")
+        tosLog.notice(
+            "[navigation] playNext called — relatedVideos=\(self.relatedVideos.count) hasNext=\(self.hasNext)")
         guard let next = relatedVideos.first else { return }
         tosLog.notice("[navigation] playNext — \(next.id, privacy: .public)")
         onPlayNext?(next)
+    }
+
+    /// Called when the embed reports `playerState == .ended`. Mirrors
+    /// PlaybackViewModel+Navigation.handlePlaybackEnd()'s gating exactly:
+    /// loop takes priority, then queue/playlist continuation happens
+    /// unconditionally (matches the AVPlayer pipeline — playlist intent implies
+    /// sequential playback regardless of the general Autoplay toggle), and only
+    /// the final "suggestions" fallback is gated by `settings.autoplayEnabled`.
+    /// `playNext()` already contains the queue-vs-suggestions logic, so this only
+    /// needs to add the gating `handlePlaybackEnd()` itself doesn't have.
+    func handlePlaybackEnd() {
+        if settings.loopEnabled {
+            tosLog.notice("[navigation] handlePlaybackEnd — loop enabled, replaying")
+            seekTo(0)
+            play()
+            return
+        }
+        if playlistId == CurrentQueueStore.playlistID {
+            tosLog.notice("[navigation] handlePlaybackEnd — queue context, advancing unconditionally")
+            playNext()
+            return
+        }
+        guard settings.autoplayEnabled else {
+            tosLog.notice("[navigation] handlePlaybackEnd — autoplay disabled, leaving native end screen")
+            return
+        }
+        tosLog.notice("[navigation] handlePlaybackEnd — autoplay enabled, advancing to suggestion")
+        playNext()
     }
 
     /// Swipe-right handler.
@@ -65,7 +95,8 @@ extension TOSPlayerViewModel {
                 guard count > 0 else { return }
                 let prevIdx = idx > 0 ? idx - 1 : count - 1
                 guard let prev = await CurrentQueueStore.shared.videoAt(index: prevIdx) else { return }
-                tosLog.notice("[navigation] playPrevious (queue) — index=\(prevIdx)/\(count) id=\(prev.id, privacy: .public)")
+                tosLog.notice(
+                    "[navigation] playPrevious (queue) — index=\(prevIdx)/\(count) id=\(prev.id, privacy: .public)")
                 onPlayNext?(prev)
             }
             return
@@ -86,7 +117,10 @@ extension TOSPlayerViewModel {
         if let cachedNextInfo = cached.nextInfo {
             let isStale = cached.staleFields.contains(.nextInfo)
             relatedVideos = filter(cachedNextInfo.relatedVideos, videoId: videoId)
-            tosLog.notice("[navigation] cache \(isStale ? "STALE" : "HIT") — \(self.relatedVideos.count) related video(s) for \(videoId)")
+            chapters = cachedNextInfo.chapters
+            tosLog.notice(
+                "[navigation] cache \(isStale ? "STALE" : "HIT") — \(self.relatedVideos.count) related video(s), \(self.chapters.count) chapter(s) for \(videoId)"
+            )
             if relatedVideos.isEmpty { await searchFallback() }
             guard isStale else { return }
             Task(priority: .background) { [weak self] in
@@ -97,6 +131,7 @@ extension TOSPlayerViewModel {
                     let updated = self.filter(fresh.relatedVideos, videoId: videoId)
                     tosLog.notice("[navigation] revalidated — \(updated.count) related video(s) for \(videoId)")
                     if !updated.isEmpty { self.relatedVideos = updated }
+                    self.chapters = fresh.chapters
                 }
             }
             return
@@ -109,7 +144,10 @@ extension TOSPlayerViewModel {
         }
         await VideoPreloadCache.shared.store(nextInfo: fresh, for: videoId)
         relatedVideos = filter(fresh.relatedVideos, videoId: videoId)
-        tosLog.notice("[navigation] cache MISS — fetched \(self.relatedVideos.count) related video(s) for \(videoId)")
+        chapters = fresh.chapters
+        tosLog.notice(
+            "[navigation] cache MISS — fetched \(self.relatedVideos.count) related video(s), \(self.chapters.count) chapter(s) for \(videoId)"
+        )
         if relatedVideos.isEmpty { await searchFallback() }
     }
 
@@ -130,4 +168,4 @@ extension TOSPlayerViewModel {
         videos.filter { $0.id != videoId && !seenVideoIds.contains($0.id) }
     }
 }
-#endif // !os(tvOS)
+#endif  // !os(tvOS)

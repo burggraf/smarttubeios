@@ -11,22 +11,34 @@ import Foundation
 public enum ShortsEmbedURL {
 
     /// Builds `https://www.youtube.com/embed/{videoId}?...` with the query items
-    /// required for an autoplaying, muted, inline, controls-visible Shorts embed.
-    /// `SwipeGestureOverlay` lets touches pass through to this native chrome so
-    /// YouTube's own play/pause and top-right controls remain reachable.
+    /// required for an autoplaying, muted, inline Shorts embed. YouTube chrome is
+    /// hidden; the Shorts player supplies native playback controls.
     public static func embedURL(videoId: String, startTime: Double = 0) -> URL {
         var comps = URLComponents(string: "https://www.youtube.com/embed/\(videoId)")!
         comps.queryItems = [
-            URLQueryItem(name: "autoplay",       value: "1"),
-            URLQueryItem(name: "mute",           value: "1"),
-            URLQueryItem(name: "controls",       value: "0"),
-            URLQueryItem(name: "playsinline",    value: "1"),
-            URLQueryItem(name: "rel",            value: "0"),
+            URLQueryItem(name: "autoplay", value: "1"),
+            URLQueryItem(name: "mute", value: "1"),
+            URLQueryItem(name: "controls", value: "0"),
+            URLQueryItem(name: "playsinline", value: "1"),
+            URLQueryItem(name: "rel", value: "0"),
             URLQueryItem(name: "iv_load_policy", value: "3"),
-            URLQueryItem(name: "start",          value: "\(Int(startTime))"),
-            URLQueryItem(name: "origin",         value: "https://www.example.com"),
+            URLQueryItem(name: "start", value: "\(Int(startTime))"),
+            URLQueryItem(name: "origin", value: "https://www.example.com"),
         ]
         return comps.url!
+    }
+
+    /// Extracts the `videoId` back out of `embedURL(videoId:)`'s output, e.g.
+    /// `https://www.youtube.com/embed/abc123?autoplay=1...` → `"abc123"`. Used to
+    /// detect stale "ready" messages from an abandoned `loadShort(video:)` call
+    /// (see `ShortsEmbedPlayerViewModel+WebBridge.swift`'s "ready" case, #275) —
+    /// the embed URL is the only signal available that ties a JS bridge message
+    /// back to the specific video it was loading.
+    public static func videoId(fromEmbedURL url: URL) -> String? {
+        let path = url.path
+        guard let range = path.range(of: "/embed/") else { return nil }
+        let id = path[range.upperBound...]
+        return id.isEmpty ? nil : String(id)
     }
 
     /// Wraps an embed URL in the `<iframe id="yt">` HTML page used by

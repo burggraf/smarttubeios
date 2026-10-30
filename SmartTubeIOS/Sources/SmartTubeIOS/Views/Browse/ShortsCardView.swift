@@ -1,5 +1,5 @@
-import SwiftUI
 import SmartTubeIOSCore
+import SwiftUI
 
 // MARK: - ShortsCardView
 //
@@ -16,7 +16,9 @@ struct ShortsCardView: View {
     @Environment(\.innerTubeAPI) private var api
     @State private var watchLaterAlert: DownloadAlertItem?
     #if !os(tvOS)
+    #if ENABLE_DOWNLOADS
     @Environment(VideoDownloadService.self) private var downloadService
+    #endif
     #endif
 
     /// Primary thumbnail URL: portrait oardefault.jpg when the API provided one
@@ -63,7 +65,7 @@ struct ShortsCardView: View {
         .onTapGesture(perform: onTap)
         .contextMenu {
             #if !os(tvOS)
-            if let shareURL = URL(string: "https://www.youtube.com/watch?v=\(video.id)") {
+            if let shareURL = video.shareURL {
                 ShareLink(item: shareURL) {
                     Label("Share", systemImage: AppSymbol.share)
                 }
@@ -87,7 +89,9 @@ struct ShortsCardView: View {
                             try await api.addToWatchLater(videoId: video.id)
                             watchLaterAlert = DownloadAlertItem(
                                 title: String(localized: "Saved to Watch Later", bundle: .module),
-                                message: String(localized: "\"\(video.title)\" was added to your Watch Later playlist.", bundle: .module)
+                                message: String(
+                                    localized: "\"\(video.title)\" was added to your Watch Later playlist.",
+                                    bundle: .module)
                             )
                         } catch {
                             watchLaterAlert = DownloadAlertItem(
@@ -166,7 +170,7 @@ struct ShortsCardView: View {
                     }
                 }
             }
-            #if !os(tvOS)
+            #if !os(tvOS) && ENABLE_DOWNLOADS
             Button {
                 downloadService.download(video: video)
             } label: {
@@ -184,4 +188,3 @@ struct ShortsCardView: View {
         }
     }
 }
-

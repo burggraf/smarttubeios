@@ -1,7 +1,11 @@
-import SwiftUI
 import SmartTubeIOS
 import SmartTubeIOSCore
+import SwiftUI
 import os
+
+#if os(iOS)
+import CoreSpotlight
+#endif
 
 /// Unified entry point for iOS, iPadOS and macOS.
 @main
@@ -26,7 +30,9 @@ struct AppEntry: App {
     @State private var channelDeepLinkConsumed = false
     @State private var queueInjectConsumed = false
     /// Shared download service for video cards. See SmartTubeIOS/RootView.swift.
+    #if ENABLE_DOWNLOADS
     @State private var cardDownloadService: VideoDownloadService
+    #endif
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @State private var watchLaterAlert: WatchLaterAlert?
@@ -37,13 +43,14 @@ struct AppEntry: App {
     }
     #endif
 
-    private static let appGroup             = "group.com.dmarie.smarttube"
-    private static let pendingKey           = "pendingVideoID"
+    private static let appGroup = HomeWidgetStore.appGroup
+    private static let pendingKey = "pendingVideoID"
     private static let pendingWatchLaterKey = "pendingWatchLaterVideoID"
-    private static let pendingQueueKey      = "pendingQueueVideoID"
-    private static let pendingRSSFeedKey    = "pendingRSSFeedURL"
+    private static let pendingQueueKey = "pendingQueueVideoID"
+    private static let pendingRSSFeedKey = "pendingRSSFeedURL"
 
     init() {
+        CrashlyticsLogger.isEnabled = false
         let settingsStore = SettingsStore()
         let poTokenProvider: (any PoTokenProvider)? = {
             if let url = settingsStore.settings.poTokenServiceURL {
@@ -52,28 +59,39 @@ struct AppEntry: App {
             return BotGuardClient()
         }()
         let api = InnerTubeAPI(authToken: nil, poTokenProvider: poTokenProvider)
-        _api             = State(initialValue: api)
-        _authService     = State(initialValue: AuthService())
-        _browseViewModel = State(initialValue: BrowseViewModel(api: api))
-        _settingsStore   = State(initialValue: settingsStore)
+        _api = State(initialValue: api)
+        _authService = State(initialValue: AuthService())
+        let browseViewModel = BrowseViewModel(api: api)
+        _browseViewModel = State(initialValue: browseViewModel)
+        _settingsStore = State(initialValue: settingsStore)
         #if os(iOS)
         let playerStateStore = PlayerStateStore(api: api)
         let tosPlayerStateStore = TOSPlayerStateStore()
-        _playerStateStore    = State(initialValue: playerStateStore)
+        _playerStateStore = State(initialValue: playerStateStore)
         _tosPlayerStateStore = State(initialValue: tosPlayerStateStore)
-        _playerRouter = State(initialValue: PlayerRouter(
-            playerState: playerStateStore,
-            tosState: tosPlayerStateStore,
-            settingsStore: settingsStore
-        ))
+        _playerRouter = State(
+            initialValue: PlayerRouter(
+                playerState: playerStateStore,
+                tosState: tosPlayerStateStore,
+                settingsStore: settingsStore
+            ))
         #endif
+        #if ENABLE_DOWNLOADS
         _cardDownloadService = State(initialValue: VideoDownloadService(api: api))
+        #endif
+        #if os(iOS)
+        // Task #353: keep the Home Screen widget's snapshot in step with the Home page.
+        HomeWidgetPublisher.attach(to: browseViewModel)
+        // Player-control App Intents (play/pause, skip, next) act on these stores.
+        PlayerRemote.attach(playerState: playerStateStore, tosState: tosPlayerStateStore)
+        #endif
 
         // --uitesting-force-stream-method=<method>: restricts exhaustiveRetry to a
         // single named stream-fetching client.  Written here (main thread, before any
         // concurrent work) so the nonisolated(unsafe) static is safe to read later.
         if let arg = ProcessInfo.processInfo.arguments
-                .first(where: { $0.hasPrefix("--uitesting-force-stream-method=") }) {
+            .first(where: { $0.hasPrefix("--uitesting-force-stream-method=") })
+        {
             let method = String(arg.dropFirst("--uitesting-force-stream-method=".count))
             if !method.isEmpty {
                 StreamMethodProbeSupport.forcedStreamMethod = method
@@ -119,7 +137,9 @@ struct AppEntry: App {
                 .environment(browseViewModel)
                 .environment(settingsStore)
                 .environment(\.innerTubeAPI, api)
-                .environment(cardDownloadService)
+                #if ENABLE_DOWNLOADS
+            .environment(cardDownloadService)
+                #endif
                 .onChange(of: authService.accessToken, initial: true) { _, newToken in
                     Task {
                         await api.setAuthToken(newToken)
@@ -162,6 +182,7 @@ struct AppEntry: App {
                 .environment(authService)
                 .environment(browseViewModel)
                 .environment(settingsStore)
+                .tint(settingsStore.settings.accentColor.color)
                 .frame(minWidth: 480)
         }
         #elseif os(tvOS)
@@ -173,7 +194,9 @@ struct AppEntry: App {
                 .environment(browseViewModel)
                 .environment(settingsStore)
                 .environment(\.innerTubeAPI, api)
-                .environment(cardDownloadService)
+                #if ENABLE_DOWNLOADS
+            .environment(cardDownloadService)
+                #endif
                 .onChange(of: authService.accessToken, initial: true) { _, newToken in
                     Task {
                         await api.setAuthToken(newToken)
@@ -204,86 +227,111 @@ struct AppEntry: App {
                     .environment(settingsStore)
                     .environment(\.innerTubeAPI, api)
                     .environment(playerStateStore)
-                    .environment(cardDownloadService)
+                    #if ENABLE_DOWNLOADS
+                .environment(cardDownloadService)
+                    #endif
             } else {
                 RootView()
                     .environment(authService)
                     .environment(browseViewModel)
                     .environment(settingsStore)
                     .environment(\.innerTubeAPI, api)
-                    .environment(cardDownloadService)
-                    #if os(iOS)
-                    .environment(playerStateStore)
-                    .environment(tosPlayerStateStore)
-                    .environment(playerRouter)
+                    #if ENABLE_DOWNLOADS
+                .environment(cardDownloadService)
                     #endif
-                    .onChange(of: authService.accessToken, initial: true) { _, newToken in
-                        #if os(iOS)
-                        playerStateStore.vm.updateAuthToken(newToken)
-                        #endif
-                        Task {
-                            await api.setAuthToken(newToken)
-                            await browseViewModel.updateAuthToken(newToken)
-                        }
-                    }
-                    .onChange(of: authService.sapisid, initial: true) { _, newSapisid in
-                        #if os(iOS)
-                        playerStateStore.vm.updateSAPISID(newSapisid)
-                        #endif
-                        Task { await api.setSAPISID(newSapisid) }
-                    }
-                    .onChange(of: settingsStore.settings.enabledSections) { _, newSections in
-                        browseViewModel.configureSections(newSections)
-                    }
-                    .onChange(of: settingsStore.settings.historyState, initial: true) { _, newState in
-                        browseViewModel.updateHistoryEnabled(newState == .enabled)
-                    }
-                    .onChange(of: settingsStore.settings.perDeviceRecommendationsEnabled) { _, enabled in
-                        Task {
-                            if !enabled { await api.resetVisitorData() }
-                            browseViewModel.loadContent(refresh: true, source: "perDeviceRecommendationsChanged")
-                        }
-                    }
-                    .onOpenURL { url in handleOpenURL(url) }
-                    .onChange(of: scenePhase, initial: true) { _, phase in
-                        if phase == .active {
-                            consumePendingVideoID()
-                            consumePendingVideoFromLaunchArgs()
-                            consumeDeepLinkFromLaunchArgs()
-                            consumeChannelDeepLinkFromLaunchArgs()
-                            consumeQueueInjectFromLaunchArgs()
-                            consumeBotGuardProbeFromLaunchArgs()
-                            authService.handleForeground()
-                            browseViewModel.refreshIfStale()
-                            consumePendingRSSFeedURL()
-                            #if os(iOS)
-                            consumePendingWatchLaterID()
-                            consumePendingQueueVideoID()
-                            if playerStateStore.presentation == .miniPlayer {
-                                playerStateStore.vm.handleForeground()
-                            }
-                            #endif
-                        } else if phase == .background {
-                            #if os(iOS)
-                            if playerStateStore.presentation == .miniPlayer {
-                                playerStateStore.vm.handleBackground()
-                            }
-                            #endif
-                        }
-                    }
-                    .onAppear {
-                        enableShortsIfNeeded()
-                        signOutIfNeeded()
-                    }
                     #if os(iOS)
-                    .alert(item: $watchLaterAlert) { item in
-                        Alert(
-                            title: Text(item.title),
-                            message: Text(item.message),
-                            dismissButton: .default(Text("OK"))
-                        )
-                    }
+                .environment(playerStateStore)
+                .environment(tosPlayerStateStore)
+                .environment(playerRouter)
+                #endif
+                .onChange(of: authService.accessToken, initial: true) { _, newToken in
+                    #if os(iOS)
+                    playerStateStore.vm.updateAuthToken(newToken)
                     #endif
+                    Task {
+                        await api.setAuthToken(newToken)
+                        await browseViewModel.updateAuthToken(newToken)
+                    }
+                }
+                .onChange(of: authService.sapisid, initial: true) { _, newSapisid in
+                    #if os(iOS)
+                    playerStateStore.vm.updateSAPISID(newSapisid)
+                    #endif
+                    Task { await api.setSAPISID(newSapisid) }
+                }
+                .onChange(of: settingsStore.settings.enabledSections) { _, newSections in
+                    browseViewModel.configureSections(newSections)
+                }
+                .onChange(of: settingsStore.settings.historyState, initial: true) { _, newState in
+                    browseViewModel.updateHistoryEnabled(newState == .enabled)
+                }
+                .onChange(of: settingsStore.settings.perDeviceRecommendationsEnabled) { _, enabled in
+                    Task {
+                        if !enabled { await api.resetVisitorData() }
+                        browseViewModel.loadContent(refresh: true, source: "perDeviceRecommendationsChanged")
+                    }
+                }
+                .onOpenURL { url in handleOpenURL(url) }
+                #if os(iOS)
+                // Spotlight: tapping a video or channel result opens it.
+                .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                    guard let id = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
+                        let route = SpotlightIndexer.route(forIdentifier: id)
+                    else { return }
+                    handleOpenURL(route.url)
+                }
+                // Spotlight: recently watched videos (removed when history is off or cleared)
+                // and subscribed channels (removed on sign-out).
+                .onChange(of: LocalWatchHistoryStore.shared.entries.map(\.video.id), initial: true) { _, _ in
+                    syncSpotlightHistory()
+                }
+                .onChange(of: settingsStore.settings.historyState) { _, _ in syncSpotlightHistory() }
+                .onChange(of: browseViewModel.subscribedChannels) { _, channels in
+                    if !channels.isEmpty { SpotlightIndexer.shared.syncChannels(channels) }
+                }
+                .onChange(of: authService.isSignedIn) { _, signedIn in
+                    if !signedIn { SpotlightIndexer.shared.syncChannels([]) }
+                }
+                #endif
+                .onChange(of: scenePhase, initial: true) { _, phase in
+                    if phase == .active {
+                        consumePendingVideoID()
+                        consumePendingVideoFromLaunchArgs()
+                        consumeDeepLinkFromLaunchArgs()
+                        consumeChannelDeepLinkFromLaunchArgs()
+                        consumeQueueInjectFromLaunchArgs()
+                        consumeBotGuardProbeFromLaunchArgs()
+                        authService.handleForeground()
+                        browseViewModel.refreshIfStale()
+                        consumePendingRSSFeedURL()
+                        #if os(iOS)
+                        consumePendingWatchLaterID()
+                        consumePendingQueueVideoID()
+                        if playerStateStore.presentation == .miniPlayer {
+                            playerStateStore.vm.handleForeground()
+                        }
+                        #endif
+                    } else if phase == .background {
+                        #if os(iOS)
+                        if playerStateStore.presentation == .miniPlayer {
+                            playerStateStore.vm.handleBackground()
+                        }
+                        #endif
+                    }
+                }
+                .onAppear {
+                    enableShortsIfNeeded()
+                    signOutIfNeeded()
+                }
+                #if os(iOS)
+                .alert(item: $watchLaterAlert) { item in
+                    Alert(
+                        title: Text(item.title),
+                        message: Text(item.message),
+                        dismissButton: .default(Text("OK"))
+                    )
+                }
+                #endif
             }
         }
         #endif
@@ -293,17 +341,69 @@ struct AppEntry: App {
 
     @MainActor
     private func handleOpenURL(_ url: URL) {
-        let scheme = url.scheme?.lowercased() ?? ""
+        // smarttube://video/ID and smarttube://watch?v=ID come from the Share Extension, the
+        // widget and hand-built links (#84); the other routes from App Intents and Spotlight.
+        // See SmartTubeRoute for the full list.
+        guard let route = SmartTubeRoute(url: url) else { return }
+        os.Logger(subsystem: "com.void.smarttube.app", category: "DeepLink")
+            .notice("handleOpenURL \(url.absoluteString, privacy: .public)")
+        switch route {
+        case .video(let videoID):
+            // Use video ID as placeholder title during UI testing so player.titleLabel
+            // has non-empty text and is visible to XCTest in the AX tree from the moment
+            // the player opens, before the API call returns the real title.
+            let isUITesting = ProcessInfo.processInfo.arguments.contains("--uitesting")
+            openVideo(Video(id: videoID, title: isUITesting ? videoID : "", channelTitle: ""))
+        case .channel(let channelID):
+            leaveFullScreenPlayer()
+            NotificationCenter.default.post(
+                name: Notification.Name("com.smarttube.openChannel"), object: nil,
+                userInfo: ["channelId": channelID, "channelTitle": ""])
+        case .search(let query):
+            leaveFullScreenPlayer()
+            NotificationCenter.default.post(name: .smartTubeOpenSearch, object: nil, userInfo: ["query": query])
+        case .section(let type):
+            leaveFullScreenPlayer()
+            NotificationCenter.default.post(
+                name: .smartTubeOpenSection, object: nil, userInfo: ["section": type.rawValue])
+        case .playWatchLater:
+            Task { @MainActor in
+                // Needs a signed-in account; otherwise show the Watch Later section, which
+                // explains that.
+                guard let first = try? await api.fetchPlaylistVideos(playlistId: "WL").videos.first else {
+                    handleOpenURL(SmartTubeRoute.section(.watchLater).url)
+                    return
+                }
+                var video = first
+                video.playlistId = "WL"
+                video.playlistIndex = 0
+                openVideo(video)
+            }
+        case .continueWatching:
+            // The player resumes from the saved position (VideoStateStore).
+            if let last = LocalWatchHistoryStore.shared.videos.first {
+                openVideo(last)
+            } else {
+                handleOpenURL(SmartTubeRoute.section(.history).url)
+            }
+        }
+    }
 
-        // smarttube://video/VIDEO_ID — fired by the Share Extension
-        guard scheme == "smarttube", url.host?.lowercased() == "video" else { return }
-        let components = url.pathComponents.filter { $0 != "/" }
-        guard let videoID = components.first, !videoID.isEmpty else { return }
-        // Use video ID as placeholder title during UI testing so player.titleLabel
-        // has non-empty text and is visible to XCTest in the AX tree from the moment
-        // the player opens, before the API call returns the real title.
-        let isUITesting = ProcessInfo.processInfo.arguments.contains("--uitesting")
-        browseViewModel.deepLinkedVideo = Video(id: videoID, title: isUITesting ? videoID : "", channelTitle: "")
+    @MainActor
+    private func openVideo(_ video: Video) {
+        #if os(iOS)
+        // While a full-screen player is up, UIKit has removed the main SwiftUI view from the
+        // window and its updates are paused, so MainTabView's onChange(of: deepLinkedVideo)
+        // would not run until the player closed: a widget / Share Extension link opened
+        // while watching did nothing. Route straight to the player instead.
+        if playerStateStore.presentation == .fullScreen || tosPlayerStateStore.presentation == .fullScreen {
+            playerRouter.open(video: video, api: api)
+        } else {
+            browseViewModel.deepLinkedVideo = video
+        }
+        #else
+        browseViewModel.deepLinkedVideo = video
+        #endif
 
         // Clear the App Group pending key so consumePendingVideoID() does not replay
         // this video on the next cold start. When the app is already active, scenePhase
@@ -315,13 +415,31 @@ struct AppEntry: App {
         }
     }
 
+    #if os(iOS)
+    @MainActor
+    private func syncSpotlightHistory() {
+        let enabled = settingsStore.settings.historyState == .enabled
+        SpotlightIndexer.shared.syncHistory(enabled ? LocalWatchHistoryStore.shared.videos : [])
+    }
+    #endif
+
+    /// Search, section and channel routes navigate the tabs underneath the player, so a
+    /// full-screen player shrinks to the mini player (playback continues).
+    @MainActor
+    private func leaveFullScreenPlayer() {
+        #if os(iOS)
+        if tosPlayerStateStore.presentation == .fullScreen { tosPlayerStateStore.minimize() }
+        if playerStateStore.presentation == .fullScreen { playerStateStore.minimize() }
+        #endif
+    }
+
     // MARK: - App Group pending video (from Share Extension)
 
     @MainActor
     private func consumePendingVideoID() {
         guard let defaults = UserDefaults(suiteName: Self.appGroup),
-              let videoID = defaults.string(forKey: Self.pendingKey),
-              !videoID.isEmpty
+            let videoID = defaults.string(forKey: Self.pendingKey),
+            !videoID.isEmpty
         else { return }
 
         defaults.removeObject(forKey: Self.pendingKey)
@@ -335,8 +453,8 @@ struct AppEntry: App {
     @MainActor
     private func consumePendingWatchLaterID() {
         guard let defaults = UserDefaults(suiteName: Self.appGroup),
-              let videoID = defaults.string(forKey: Self.pendingWatchLaterKey),
-              !videoID.isEmpty
+            let videoID = defaults.string(forKey: Self.pendingWatchLaterKey),
+            !videoID.isEmpty
         else { return }
 
         defaults.removeObject(forKey: Self.pendingWatchLaterKey)
@@ -372,8 +490,8 @@ struct AppEntry: App {
     @MainActor
     private func consumePendingQueueVideoID() {
         guard let defaults = UserDefaults(suiteName: Self.appGroup),
-              let videoID = defaults.string(forKey: Self.pendingQueueKey),
-              !videoID.isEmpty
+            let videoID = defaults.string(forKey: Self.pendingQueueKey),
+            !videoID.isEmpty
         else { return }
 
         defaults.removeObject(forKey: Self.pendingQueueKey)
@@ -389,9 +507,9 @@ struct AppEntry: App {
     @MainActor
     private func consumePendingRSSFeedURL() {
         guard let defaults = UserDefaults(suiteName: Self.appGroup),
-              let urlString = defaults.string(forKey: Self.pendingRSSFeedKey),
-              !urlString.isEmpty,
-              let feedURL = URL(string: urlString)
+            let urlString = defaults.string(forKey: Self.pendingRSSFeedKey),
+            !urlString.isEmpty,
+            let feedURL = URL(string: urlString)
         else { return }
 
         defaults.removeObject(forKey: Self.pendingRSSFeedKey)
@@ -427,7 +545,7 @@ struct AppEntry: App {
             // causing DASH quality-switch tests to fail even on an authenticated simulator.
             if authService.isSignedIn, authService.accessToken == nil {
                 for _ in 0..<50 {
-                    try? await Task.sleep(nanoseconds: 100_000_000)   // 100 ms
+                    try? await Task.sleep(nanoseconds: 100_000_000)  // 100 ms
                     if authService.accessToken != nil { break }
                 }
             }
@@ -439,7 +557,7 @@ struct AppEntry: App {
                 // with a brief 0.5 s settling delay so landscapePlayerCover is registered.
                 // Use the video ID as the placeholder title so player.titleLabel has
                 // non-empty text immediately (empty Text is pruned from the AX tree).
-                try? await Task.sleep(nanoseconds: 500_000_000)   // 0.5 s
+                try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5 s
                 browseViewModel.deepLinkedVideo = Video(id: videoID, title: videoID, channelTitle: "")
             } else {
                 await UIApplication.shared.open(deepLink)
@@ -553,13 +671,17 @@ struct AppEntry: App {
                 let token = try await client.token(for: videoID)
                 let hasMinter = client.lastRunHasMinter
                 let itLen = client.lastRunIntegrityTokenLen
-                probeLog.notice("[BotGuardProbe] ✅ PIPELINE COMPLETE tokenLen=\(token.count) hasMinter=\(hasMinter) integrityTokenLen=\(itLen) videoId=\(videoID)")
+                probeLog.notice(
+                    "[BotGuardProbe] ✅ PIPELINE COMPLETE tokenLen=\(token.count) hasMinter=\(hasMinter) integrityTokenLen=\(itLen) videoId=\(videoID)"
+                )
                 if let url = resultURL {
-                    let result = "SUCCESS\ntokenLen=\(token.count)\nhasMinter=\(hasMinter)\nintegrityTokenLen=\(itLen)\nvideoId=\(videoID)\n"
+                    let result =
+                        "SUCCESS\ntokenLen=\(token.count)\nhasMinter=\(hasMinter)\nintegrityTokenLen=\(itLen)\nvideoId=\(videoID)\n"
                     try? result.write(to: url, atomically: true, encoding: .utf8)
                 }
             } catch {
-                probeLog.notice("[BotGuardProbe] ❌ PIPELINE FAILED error=\(String(describing: error)) videoId=\(videoID)")
+                probeLog.notice(
+                    "[BotGuardProbe] ❌ PIPELINE FAILED error=\(String(describing: error)) videoId=\(videoID)")
                 if let url = resultURL {
                     let result = "FAILED\nerror=\(error)\nvideoId=\(videoID)\n"
                     try? result.write(to: url, atomically: true, encoding: .utf8)
@@ -589,14 +711,15 @@ struct AppEntry: App {
         let ids = raw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
         guard !ids.isEmpty else { return stubShorts }
         return ids.enumerated().map { idx, id in
-            Video(id: id, title: "Short \(idx + 1)", channelTitle: "Test Channel",
-                  channelId: "UCBcRF18a7Qf58cCRy5xuWwQ", isShort: true)
+            Video(
+                id: id, title: "Short \(idx + 1)", channelTitle: "Test Channel",
+                channelId: "UCBcRF18a7Qf58cCRy5xuWwQ", isShort: true)
         }
     }
 
     static let stubShorts: [Video] = [
-        Video(id: "short-1", title: "Short One",   channelTitle: "Channel A", isShort: true),
-        Video(id: "short-2", title: "Short Two",   channelTitle: "Channel B", isShort: true),
+        Video(id: "short-1", title: "Short One", channelTitle: "Channel A", isShort: true),
+        Video(id: "short-2", title: "Short Two", channelTitle: "Channel B", isShort: true),
         Video(id: "short-3", title: "Short Three", channelTitle: "Channel C", isShort: true),
     ]
 }

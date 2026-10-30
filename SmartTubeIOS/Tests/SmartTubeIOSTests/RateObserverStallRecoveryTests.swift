@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+
 @testable import SmartTubeIOSCore
 
 // MARK: - RateObserverStallRecoveryTests
@@ -33,7 +34,7 @@ struct RateObserverStallRecoveryTests {
     @Test func rateObserverRecoveryGuardUsesNegatedIsPlaying() {
         // Simulate: after rateObserver fires, isPlaying is set to false.
         var isPlaying = true
-        isPlaying = false // rateObserver sets this
+        isPlaying = false  // rateObserver sets this
 
         // Recovery guard: proceed only if !isPlaying (stalled) AND rate is still 0.
         // If user resumed manually between the stall and the 2s recovery window,
@@ -83,10 +84,56 @@ struct RateObserverStallRecoveryTests {
 
         // Scenario B: user manually resumed during seek — skip rate restore.
         var isPlayingB: Bool = true  // user pressed play
-        var rateB: Float = 1.0       // player already running
+        var rateB: Float = 1.0  // player already running
         let shouldRestoreB = !isPlayingB && rateB == 0
         #expect(!shouldRestoreB, "should not overwrite rate when user already resumed")
-        _ = isPlayingA; _ = rateA; _ = isPlayingB; _ = rateB
+        _ = isPlayingA
+        _ = rateA
+        _ = isPlayingB
+        _ = rateB
+    }
+
+    // MARK: - End-of-video false-stall guard (App Store review 2026-06-25)
+    //
+    // Crashlytics confirmed a video with duration=15.3s generating stall #1-4 at
+    // t=15s: the video ended naturally, rate→0, but the rateObserver misidentified
+    // it as a network stall and sought back to 15.246s, fighting the natural ending
+    // and blocking didPlayToEndTimeNotification / handlePlaybackEnd(). Fix: add a
+    // nearEnd guard so the stall path is skipped within 1s of the total duration.
+
+    /// Stall detection must be skipped when currentTime is within 1 s of duration.
+    @Test func nearEndIsNotTreatedAsStall() {
+        let duration = 15.3
+        // currentTime at the crash: 15.246s — clearly near end
+        let currentTimeNearEnd = 15.246
+        let nearEnd = duration > 0 && currentTimeNearEnd >= duration - 1.0
+        #expect(nearEnd, "t=15.246s of 15.3s video must be classified as near-end, not a stall")
+
+        // Stall detection formula from rateObserver:
+        let isPlaying = true
+        let isSwappingItem = false
+        let isHandlingAudioInterruption = false
+        let playerWentSilent = true && isPlaying && !isSwappingItem && !isHandlingAudioInterruption && !nearEnd
+        #expect(!playerWentSilent, "rateObserver must not treat end-of-video rate→0 as a stall")
+    }
+
+    /// Stall detection must still fire when currentTime is well before the end.
+    @Test func midVideoRateDropIsStillTreatedAsStall() {
+        let duration = 300.0  // 5-minute video
+        let currentTimeMidVideo = 42.0
+        let nearEnd = duration > 0 && currentTimeMidVideo >= duration - 1.0
+        #expect(!nearEnd, "t=42s of 300s video should NOT be near-end")
+
+        let playerWentSilent = true && !false && !false && !nearEnd
+        #expect(playerWentSilent, "mid-video rate→0 should still be treated as a stall")
+    }
+
+    /// nearEnd guard must not fire when duration is unknown (0).
+    @Test func unknownDurationDoesNotTriggerNearEndGuard() {
+        let duration = 0.0  // not yet known
+        let currentTime = 0.0
+        let nearEnd = duration > 0 && currentTime >= duration - 1.0
+        #expect(!nearEnd, "nearEnd must be false when duration is not yet known")
     }
 
     // MARK: - Rapid-stall loop escalation (#261)

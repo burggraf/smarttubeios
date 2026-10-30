@@ -46,8 +46,11 @@ public protocol InnerTubeAPIProtocol: AnyObject, Sendable {
     func fetchPlaylistVideos(playlistId: String, continuationToken: String?) async throws -> VideoGroup
 
     // MARK: Playlist editing
-    func addToWatchLater(videoId: String) async throws
-    func removeFromWatchLater(videoId: String) async throws
+    @discardableResult
+    func addToWatchLater(videoId: String) async throws -> String?
+    func removeFromWatchLater(setVideoId: String) async throws
+    func addToPlaylist(playlistId: String, videoId: String) async throws
+    func removeFromPlaylist(playlistId: String, setVideoId: String) async throws
     func sendFeedback(token: String) async throws
     /// On-demand feedback when no pre-fetched token is available (TV-client home feed).
     /// `iconType` is one of `"NOT_INTERESTED"`, `"DISLIKE"`, or `"BLOCK_CHANNEL"`.

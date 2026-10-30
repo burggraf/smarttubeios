@@ -89,8 +89,8 @@ final class TVFocusChainUITests: XCTestCase {
             .firstMatch
         XCTAssertTrue(
             sectionContainer.waitForExistence(timeout: 10),
-            "home.sectionContainer must appear after ↓ + → + select — " +
-            "focus was not in the chip bar after one ↓ press"
+            "home.sectionContainer must appear after ↓ + → + select — "
+                + "focus was not in the chip bar after one ↓ press"
         )
     }
 
@@ -122,8 +122,8 @@ final class TVFocusChainUITests: XCTestCase {
         // Verify the player opened (proves focus reached the video list)
         XCTAssertTrue(
             titleLabel.waitForExistence(timeout: 15),
-            "player.titleLabel must appear after pressing down twice and select — " +
-            "focus chain is broken (focus did not reach the video list)"
+            "player.titleLabel must appear after pressing down twice and select — "
+                + "focus chain is broken (focus did not reach the video list)"
         )
     }
 
@@ -162,6 +162,40 @@ final class TVFocusChainUITests: XCTestCase {
     }
 
     // MARK: - Player behaviour tests
+
+    /// Custom-highlight navigation owns all player controls. Once the ellipsis is
+    /// highlighted, one Select press must open the menu instead of transferring
+    /// native focus and requiring a second press.
+    func testPlayerEllipsisOpensWithSingleSelect() throws {
+        XCTAssertTrue(chipBar.waitForExistence(timeout: 15))
+        guard waitForVideoCards(timeout: 20) else {
+            try captureAndSkip("No video cards loaded within 20 s", in: app)
+        }
+        remote.press(.down)
+        Thread.sleep(forTimeInterval: 0.6)
+        remote.press(.down)
+        Thread.sleep(forTimeInterval: 0.6)
+        remote.press(.select)
+        XCTAssertTrue(titleLabel.waitForExistence(timeout: 15), "Player must open")
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // First Up shows controls and highlights Play/Pause; second Up highlights More.
+        remote.press(.up)
+        Thread.sleep(forTimeInterval: 0.4)
+        remote.press(.up)
+        Thread.sleep(forTimeInterval: 0.4)
+        XCTAssertTrue(
+            app.buttons["player.moreButton"].firstMatch.exists,
+            "Ellipsis control must be present before activation")
+
+        remote.press(.select)
+        let speedRow = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'player.moreMenu.speedRow'"))
+            .firstMatch
+        XCTAssertTrue(
+            speedRow.waitForExistence(timeout: 5),
+            "One Select press on highlighted ellipsis must open the more menu")
+    }
 
     /// Pressing the Menu button while the player is open dismisses the player
     /// and returns to the Home screen.
@@ -294,7 +328,7 @@ final class TVFocusChainUITests: XCTestCase {
         remote.press(.select)
 
         XCTAssertTrue(titleLabel.waitForExistence(timeout: 15), "Player must open")
-        Thread.sleep(forTimeInterval: 2.0)   // let a few seconds of video load
+        Thread.sleep(forTimeInterval: 2.0)  // let a few seconds of video load
 
         // Seek left (-10 s) and right (+10 s) — player must stay open
         remote.press(.left)

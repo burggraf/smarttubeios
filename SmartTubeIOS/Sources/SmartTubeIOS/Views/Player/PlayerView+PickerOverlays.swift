@@ -1,6 +1,7 @@
-import SwiftUI
 import AVKit
 import SmartTubeIOSCore
+import SwiftUI
+
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -17,8 +18,8 @@ private let pickerLog = CrashlyticsLogger(category: "PlayerMenu")
 //   • qualityPickerOverlay       — video quality selection
 //   • speedPickerOverlay         — playback speed selection
 //   • sleepTimerPickerOverlay    — sleep timer duration
-//   • captionPickerOverlay       — subtitle/caption track (iOS only)
-//   • audioTrackPickerOverlay    — audio track selection (iOS only)
+//   • captionPickerOverlay       — subtitle/caption track selection
+//   • audioTrackPickerOverlay    — audio track selection
 //   • presentShareSheet(url:)    — UIActivityViewController (iOS only)
 
 extension PlayerView {
@@ -33,6 +34,9 @@ extension PlayerView {
             VStack(spacing: 0) {
                 HStack {
                     Button("Cancel") { showQualityPicker = false }
+                        #if os(tvOS)
+                    .buttonStyle(PickerHeaderButtonStyle())
+                        #endif
                         .padding()
                     Spacer()
                     Text("Quality")
@@ -44,10 +48,9 @@ extension PlayerView {
                 ScrollView {
                     VStack(spacing: 0) {
                         Button {
-                            pickerLog.notice("[qualityPicker] selected Auto (was: \(vm.selectedFormat?.qualityLabel ?? "Auto"))")
+                            pickerLog.notice(
+                                "[qualityPicker] selected Auto (was: \(vm.selectedFormat?.qualityLabel ?? "Auto"))")
                             vm.selectFormat(nil)
-                            store.settings.preferredQuality = .auto
-                            vm.updateSettings(store.settings)
                             showQualityPicker = false
                             qualityToastMessage = "Auto quality"
                         } label: {
@@ -71,16 +74,10 @@ extension PlayerView {
                         Divider()
                         ForEach(vm.availableFormats) { fmt in
                             Button {
-                                pickerLog.notice("[qualityPicker] selected \(fmt.qualityLabel) (was: \(vm.selectedFormat?.qualityLabel ?? "Auto"))")
+                                pickerLog.notice(
+                                    "[qualityPicker] selected \(fmt.qualityLabel) (was: \(vm.selectedFormat?.qualityLabel ?? "Auto"))"
+                                )
                                 vm.selectFormat(fmt)
-                                if let q = AppSettings.VideoQuality.from(height: fmt.height) {
-                                    store.settings.preferredQuality = q
-                                } else {
-                                    pickerLog.error("Quality picker: non-standard height \(fmt.height)p — falling back to .auto")
-                                    assertionFailure("Quality picker tapped for format with non-standard height \(fmt.height)")
-                                    store.settings.preferredQuality = .auto
-                                }
-                                vm.updateSettings(store.settings)
                                 showQualityPicker = false
                                 qualityToastMessage = "\(fmt.qualityLabel) · may take up to 30s"
                             } label: {
@@ -149,6 +146,9 @@ extension PlayerView {
             VStack(spacing: 0) {
                 HStack {
                     Button("Cancel") { showSpeedPicker = false }
+                        #if os(tvOS)
+                    .buttonStyle(PickerHeaderButtonStyle())
+                        #endif
                         .padding()
                     Spacer()
                     Text("Playback Speed")
@@ -216,6 +216,9 @@ extension PlayerView {
             VStack(spacing: 0) {
                 HStack {
                     Button("Cancel") { showSleepTimerPicker = false }
+                        #if os(tvOS)
+                    .buttonStyle(PickerHeaderButtonStyle())
+                        #endif
                         .padding()
                     Spacer()
                     Text("Sleep Timer")
@@ -299,6 +302,9 @@ extension PlayerView {
             VStack(spacing: 0) {
                 HStack {
                     Button("Cancel") { showCaptionPicker = false }
+                        #if os(tvOS)
+                    .buttonStyle(PickerHeaderButtonStyle())
+                        #endif
                         .padding()
                     Spacer()
                     Text("Captions")
@@ -328,6 +334,7 @@ extension PlayerView {
                             .padding(.vertical, 12)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("player.captionPicker.off")
                         #if os(tvOS)
                         .prefersDefaultFocus(in: captionPickerNamespace)
                         #endif
@@ -358,11 +365,15 @@ extension PlayerView {
                                 .padding(.vertical, 12)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("player.captionPicker.track.\(track.id)")
                             Divider()
                         }
                     }
                 }
                 .frame(maxHeight: 360)
+                #if os(tvOS)
+                .focused($captionPickerFocused)
+                #endif
             }
             .frame(maxWidth: moreMenuPortraitWidth)
             .background(.regularMaterial)
@@ -388,6 +399,9 @@ extension PlayerView {
             VStack(spacing: 0) {
                 HStack {
                     Button("Cancel") { showAudioTrackPicker = false }
+                        #if os(tvOS)
+                    .buttonStyle(PickerHeaderButtonStyle())
+                        #endif
                         .padding()
                     Spacer()
                     Text("Audio Track")
@@ -417,6 +431,7 @@ extension PlayerView {
                             .padding(.vertical, 12)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("player.audioTrackPicker.auto")
                         #if os(tvOS)
                         .prefersDefaultFocus(in: audioTrackPickerNamespace)
                         #endif
@@ -447,11 +462,15 @@ extension PlayerView {
                                 .padding(.vertical, 12)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("player.audioTrackPicker.track.\(track.id)")
                             Divider()
                         }
                     }
                 }
                 .frame(maxHeight: 360)
+                #if os(tvOS)
+                .focused($audioTrackPickerFocused)
+                #endif
             }
             .frame(maxWidth: moreMenuPortraitWidth)
             .background(.regularMaterial)
@@ -497,3 +516,31 @@ extension PlayerView {
     }
     #endif
 }
+
+#if os(tvOS)
+// MARK: - PickerHeaderButtonStyle (tvOS)
+
+/// Flat style for the Cancel button in picker sheet headers. The default tvOS
+/// button style renders a bright white platter that clashes with the dark
+/// sheet material; this shows a gray highlight when focused instead, matching
+/// the more-menu row treatment.
+struct PickerHeaderButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        PickerHeaderButtonLabel(configuration: configuration)
+    }
+
+    private struct PickerHeaderButtonLabel: View {
+        @Environment(\.isFocused) private var isFocused
+        let configuration: ButtonStyle.Configuration
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(isFocused ? Color.gray.opacity(0.35) : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+}
+#endif

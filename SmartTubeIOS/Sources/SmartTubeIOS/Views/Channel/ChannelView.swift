@@ -1,5 +1,5 @@
-import SwiftUI
 import SmartTubeIOSCore
+import SwiftUI
 
 // MARK: - ChannelView
 //
@@ -9,7 +9,7 @@ import SmartTubeIOSCore
 // MARK: - ChannelFilter
 
 private enum ChannelFilter: String, CaseIterable {
-    case all    = "All"
+    case all = "All"
     case shorts = "Shorts"
 }
 
@@ -24,6 +24,7 @@ public struct ChannelView: View {
     @Environment(SettingsStore.self) private var store
     @Environment(AuthService.self) private var auth
     @Environment(\.innerTubeAPI) private var api
+    @Environment(\.isLandscapeLayout) private var isLandscapeLayout
     #if os(iOS)
     @Environment(PlayerRouter.self) private var playerRouter
     #endif
@@ -86,7 +87,8 @@ public struct ChannelView: View {
                     } label: {
                         Label(
                             isExcluded ? "Remove SponsorBlock Exclusion" : "Exclude from SponsorBlock",
-                            systemImage: isExcluded ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.minus"
+                            systemImage: isExcluded
+                                ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.minus"
                         )
                     }
                 }
@@ -98,7 +100,8 @@ public struct ChannelView: View {
                     } label: {
                         Label(
                             isExcluded ? "Remove SponsorBlock Exclusion" : "Exclude from SponsorBlock",
-                            systemImage: isExcluded ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.minus"
+                            systemImage: isExcluded
+                                ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.minus"
                         )
                     }
                     .accessibilityIdentifier("channel.sponsorBlockButton")
@@ -147,8 +150,8 @@ public struct ChannelView: View {
 
     private var filteredVideos: [Video] {
         switch filter {
-        case .all:    return vm.videos.filter { !store.settings.hideShorts || !$0.isShort }
-        case .shorts: return vm.videos.filter { $0.isShort }
+        case .all: return vm.videos.filter { !store.settings.hideShorts || !$0.isShort }
+        case .shorts: return vm.shorts
         }
     }
 
@@ -203,7 +206,10 @@ public struct ChannelView: View {
                 }
                 .padding()
                 #else
-                LazyVGrid(columns: videoGridColumns, spacing: videoGridRowSpacing) {
+                LazyVGrid(
+                    columns: videoGridColumns(store.settings, landscape: isLandscapeLayout),
+                    spacing: videoGridRowSpacing
+                ) {
                     ForEach(videos) { video in
                         VideoCardView(video: video, compact: false)
                             .accessibilityIdentifier("video.card.\(video.id)")
@@ -219,6 +225,7 @@ public struct ChannelView: View {
                             }
                     }
                 }
+                .id(isLandscapeLayout)  // reset on column-count change — see VideoGridSection (#82)
                 .padding()
                 #endif
             }
@@ -230,11 +237,8 @@ public struct ChannelView: View {
         return LazyVGrid(columns: columns, spacing: 8) {
             ForEach(videos) { video in
                 VideoCardView(video: video)
-                    .aspectRatio(9/16, contentMode: .fit)
+                    .aspectRatio(9 / 16, contentMode: .fit)
                     .onTapGesture { selectShort(video, from: videos) }
-                    .onAppear {
-                        if video.id == vm.videos.last?.id { vm.loadMore() }
-                    }
             }
         }
         .padding(.horizontal)

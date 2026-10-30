@@ -1,5 +1,5 @@
-import SwiftUI
 import SmartTubeIOSCore
+import SwiftUI
 
 // MARK: - LibraryView
 //
@@ -29,14 +29,14 @@ public struct LibraryView: View {
 
     enum LibrarySection: String, CaseIterable, Identifiable {
         case subscriptions = "Subs"
-        case history       = "History"
-        case playlists     = "Playlists"
-        case rss           = "RSS Feeds"
-        case downloads     = "Downloads"
+        case history = "History"
+        case playlists = "Playlists"
+        case rss = "RSS Feeds"
+        case downloads = "Downloads"
 
-        #if os(tvOS)
-        // Downloads saves to Photos library — not supported on tvOS.
-        // Exclude the chip by hiding it from allCases on tvOS.
+        #if os(tvOS) || !ENABLE_DOWNLOADS
+        // Downloads saves to Photos library — not supported on tvOS, and compiled out of
+        // App Store builds (guideline 5.2.3). Exclude the chip by hiding it from allCases.
         static var allCases: [LibrarySection] {
             [.subscriptions, .history, .playlists, .rss]
         }
@@ -46,10 +46,10 @@ public struct LibraryView: View {
         var browseSectionType: BrowseSection.SectionType {
             switch self {
             case .subscriptions: return .subscriptions
-            case .history:       return .history
-            case .playlists:     return .playlists
-            case .rss:           return .history  // not used — RSS renders its own view
-            case .downloads:     return .history  // not used — DownloadsView renders its own content
+            case .history: return .history
+            case .playlists: return .playlists
+            case .rss: return .history  // not used — RSS renders its own view
+            case .downloads: return .history  // not used — DownloadsView renders its own content
             }
         }
     }
@@ -134,8 +134,7 @@ public struct LibraryView: View {
                 if selectedSection == .rss {
                     RSSFeedsView()
                 } else if selectedSection == .downloads {
-                    DownloadsView()
-                        .environment(DownloadStore.shared)
+                    downloadsContent
                 } else if !auth.isSignedIn && selectedSection != .subscriptions {
                     segmentSignInPrompt
                 } else if browseVM.isLoading && browseVM.videoGroups.flatMap({ $0.videos }).isEmpty {
@@ -206,11 +205,12 @@ public struct LibraryView: View {
         }
         .onChange(of: selectedSection) { _, section in
             guard section != .rss && section != .downloads else { return }
-            browseVM.select(section: BrowseSection(
-                id: section.id,
-                title: section.rawValue,
-                type: section.browseSectionType
-            ))
+            browseVM.select(
+                section: BrowseSection(
+                    id: section.id,
+                    title: section.rawValue,
+                    type: section.browseSectionType
+                ))
         }
         #if os(tvOS)
         // tvOS: player is opened via navigationDestination(item: $selectedVideo).
@@ -236,11 +236,12 @@ public struct LibraryView: View {
         }
         .onAppear {
             guard selectedSection != .rss && selectedSection != .downloads else { return }
-            browseVM.select(section: BrowseSection(
-                id: selectedSection.id,
-                title: selectedSection.rawValue,
-                type: selectedSection.browseSectionType
-            ))
+            browseVM.select(
+                section: BrowseSection(
+                    id: selectedSection.id,
+                    title: selectedSection.rawValue,
+                    type: selectedSection.browseSectionType
+                ))
             // Restore scroll position when returning from the player, another tab,
             // or any navigation that caused onDisappear to fire.
             #if os(iOS) || os(tvOS)
@@ -333,5 +334,14 @@ public struct LibraryView: View {
             .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+extension LibraryView {
+    @ViewBuilder fileprivate var downloadsContent: some View {
+        #if ENABLE_DOWNLOADS
+        DownloadsView()
+            .environment(DownloadStore.shared)
+        #endif
     }
 }

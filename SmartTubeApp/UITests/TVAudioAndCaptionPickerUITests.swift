@@ -6,6 +6,7 @@
 //   testAudioOnlyOverlayDisappearsWhenDisabled — disabling removes overlay
 //   testCaptionPickerOpensFromMoreMenu        — captions row opens picker
 //   testCaptionPickerDismissesWithMenu        — Menu press dismisses picker
+//   testCaptionPickerSelectEnablesTrackAndCloses — track selection renders captions
 //   testAudioTrackPickerOpensFromMoreMenu     — audio-track row opens picker
 //   testAudioTrackPickerDismissesWithMenu     — Menu press dismisses picker
 
@@ -58,8 +59,9 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
     private func waitForVideoCards(timeout: TimeInterval = 20) -> Bool {
         let predicate = NSPredicate(format: "identifier BEGINSWITH 'video.card.'")
         let cards = app.descendants(matching: .any).matching(predicate)
-        let exp = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count > 0"),
-                                            object: cards)
+        let exp = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "count > 0"),
+            object: cards)
         return XCTWaiter().wait(for: [exp], timeout: timeout) == .completed
     }
 
@@ -120,8 +122,9 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
                 in: app
             )
         }
-        XCTAssertTrue(audioOnlyOverlay.exists,
-                      "player.audioOnlyOverlay must appear when audio-only mode is enabled")
+        XCTAssertTrue(
+            audioOnlyOverlay.exists,
+            "player.audioOnlyOverlay must appear when audio-only mode is enabled")
     }
 
     /// After enabling audio-only mode, disabling it via the more menu removes the overlay.
@@ -151,20 +154,29 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
         var reachedMoreBtn = false
         // Try Up to shift focus to the controls toolbar, then Right/Left to reach moreButton.
         for _ in 0..<6 {
-            if moreBtn.hasFocus { reachedMoreBtn = true; break }
+            if moreBtn.hasFocus {
+                reachedMoreBtn = true
+                break
+            }
             remote.press(.up)
             Thread.sleep(forTimeInterval: 0.3)
         }
         if !reachedMoreBtn {
             for _ in 0..<8 {
-                if moreBtn.hasFocus { reachedMoreBtn = true; break }
+                if moreBtn.hasFocus {
+                    reachedMoreBtn = true
+                    break
+                }
                 remote.press(.right)
                 Thread.sleep(forTimeInterval: 0.3)
             }
         }
         if !reachedMoreBtn {
             for _ in 0..<8 {
-                if moreBtn.hasFocus { reachedMoreBtn = true; break }
+                if moreBtn.hasFocus {
+                    reachedMoreBtn = true
+                    break
+                }
                 remote.press(.left)
                 Thread.sleep(forTimeInterval: 0.3)
             }
@@ -190,8 +202,9 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
         }
         remote.press(.select)
         Thread.sleep(forTimeInterval: 3.0)
-        XCTAssertFalse(audioOnlyOverlay.exists,
-                       "player.audioOnlyOverlay must be gone after disabling audio-only mode")
+        XCTAssertFalse(
+            audioOnlyOverlay.exists,
+            "player.audioOnlyOverlay must be gone after disabling audio-only mode")
     }
 
     // MARK: - Caption Picker Tests
@@ -221,8 +234,9 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
                 in: app
             )
         }
-        XCTAssertTrue(picker.exists,
-                      "player.captionPicker must appear after selecting captions row")
+        XCTAssertTrue(
+            picker.exists,
+            "player.captionPicker must appear after selecting captions row")
     }
 
     /// After opening the caption picker, pressing Menu dismisses it and leaves the player open.
@@ -242,26 +256,64 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
             )
         }
         remote.press(.select)
-        Thread.sleep(forTimeInterval: 2.0) // extra time for focus to settle on picker
+        Thread.sleep(forTimeInterval: 2.0)  // extra time for focus to settle on picker
         let picker = element(identifier: "player.captionPicker")
         guard picker.waitForExistence(timeout: 8) else {
             try captureAndSkip("player.captionPicker did not appear — cannot test dismissal", in: app)
         }
-        // Navigate once inside the picker scope to ensure it has focus.
-        remote.press(.down)
-        Thread.sleep(forTimeInterval: 0.5)
+        let offRow = element(identifier: "player.captionPicker.off")
+        XCTAssertTrue(offRow.waitForExistence(timeout: 5), "Caption Off row must exist")
+        XCTAssertTrue(offRow.hasFocus, "Caption picker must route initial focus to Off")
         remote.press(.menu)
         Thread.sleep(forTimeInterval: 1.5)
-        // Graceful skip if focus transition timing prevents Menu from reaching the picker.
-        if element(identifier: "player.captionPicker").exists {
-            try captureAndSkip(
-                "player.captionPicker did not dismiss after Menu press — " +
-                "possible focus transition timing issue between more menu and picker scope",
-                in: app
-            )
+        XCTAssertFalse(
+            element(identifier: "player.captionPicker").exists,
+            "player.captionPicker must dismiss after one Menu press")
+        XCTAssertTrue(
+            element(identifier: "player.titleLabel").exists,
+            "player.titleLabel must still exist after dismissing caption picker")
+    }
+
+    /// Focus enters the picker, moves to a real caption track, and Select activates it.
+    func testCaptionPickerSelectEnablesTrackAndCloses() throws {
+        try waitForMoreMenu()
+        let captionsRow = element(identifier: "player.moreMenu.captionsRow")
+        guard captionsRow.waitForExistence(timeout: 5) else {
+            try captureAndSkip("player.moreMenu.captionsRow not found — video may have no captions", in: app)
         }
-        XCTAssertTrue(element(identifier: "player.titleLabel").exists,
-                      "player.titleLabel must still exist after dismissing caption picker")
+        guard focusMoreMenuRow(identifier: "player.moreMenu.captionsRow") else {
+            try captureAndSkip("captions row did not receive focus", in: app)
+        }
+        remote.press(.select)
+        let picker = element(identifier: "player.captionPicker")
+        XCTAssertTrue(picker.waitForExistence(timeout: 8), "Caption picker must open")
+        let offRow = element(identifier: "player.captionPicker.off")
+        XCTAssertTrue(offRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(offRow.hasFocus, "Caption picker must start with focus on Off")
+
+        remote.press(.down)
+        Thread.sleep(forTimeInterval: 0.5)
+        let focusedTrack = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH 'player.captionPicker.track.' AND hasFocus == true")
+        ).firstMatch
+        XCTAssertTrue(
+            focusedTrack.waitForExistence(timeout: 5),
+            "One Down press from Off must focus a caption track")
+        remote.press(.select)
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertFalse(
+            element(identifier: "player.captionPicker").exists,
+            "Selecting a caption track must close the picker")
+        XCTAssertTrue(
+            element(identifier: "player.titleLabel").exists,
+            "Player must remain open after enabling captions")
+        let cue = element(identifier: "player.captionCue")
+        XCTAssertTrue(
+            cue.waitForExistence(timeout: 15),
+            "An enabled caption track must render a cue on tvOS")
+        XCTAssertGreaterThanOrEqual(
+            cue.frame.height, 44,
+            "tvOS caption text must be large enough for television viewing")
     }
 
     // MARK: - Audio Track Picker Tests
@@ -291,8 +343,9 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
                 in: app
             )
         }
-        XCTAssertTrue(picker.exists,
-                      "player.audioTrackPicker must appear after selecting audio-track row")
+        XCTAssertTrue(
+            picker.exists,
+            "player.audioTrackPicker must appear after selecting audio-track row")
     }
 
     /// After opening the audio track picker, pressing Menu dismisses it and leaves the player open.
@@ -312,26 +365,22 @@ final class TVAudioAndCaptionPickerUITests: XCTestCase {
             )
         }
         remote.press(.select)
-        Thread.sleep(forTimeInterval: 2.0) // extra time for focus to settle on picker
+        Thread.sleep(forTimeInterval: 2.0)  // extra time for focus to settle on picker
         let picker = element(identifier: "player.audioTrackPicker")
         guard picker.waitForExistence(timeout: 8) else {
             try captureAndSkip("player.audioTrackPicker did not appear — cannot test dismissal", in: app)
         }
-        // Navigate once inside the picker scope to ensure it has focus.
-        remote.press(.down)
-        Thread.sleep(forTimeInterval: 0.5)
+        let autoRow = element(identifier: "player.audioTrackPicker.auto")
+        XCTAssertTrue(autoRow.waitForExistence(timeout: 5), "Audio Auto row must exist")
+        XCTAssertTrue(autoRow.hasFocus, "Audio picker must route initial focus to Auto")
         remote.press(.menu)
         Thread.sleep(forTimeInterval: 1.5)
-        // Graceful skip if focus transition timing prevents Menu from reaching the picker.
-        if element(identifier: "player.audioTrackPicker").exists {
-            try captureAndSkip(
-                "player.audioTrackPicker did not dismiss after Menu press — " +
-                "possible focus transition timing issue between more menu and picker scope",
-                in: app
-            )
-        }
-        XCTAssertTrue(element(identifier: "player.titleLabel").exists,
-                      "player.titleLabel must still exist after dismissing audio-track picker")
+        XCTAssertFalse(
+            element(identifier: "player.audioTrackPicker").exists,
+            "player.audioTrackPicker must dismiss after one Menu press")
+        XCTAssertTrue(
+            element(identifier: "player.titleLabel").exists,
+            "player.titleLabel must still exist after dismissing audio-track picker")
     }
 }
-#endif // os(tvOS)
+#endif  // os(tvOS)

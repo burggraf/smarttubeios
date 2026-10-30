@@ -1,6 +1,6 @@
-import SwiftUI
 import AuthenticationServices
 import SmartTubeIOSCore
+import SwiftUI
 
 // MARK: - SettingsView
 //
@@ -15,10 +15,30 @@ public struct SettingsView: View {
     #if os(tvOS)
     @State private var showGithubQR = false
     #endif
+    /// #126: whether the current visit to this screen has already passed the PIN
+    /// check. Reset to `false` on `.onDisappear` (see body) so leaving and coming back
+    /// to Settings (e.g. switching tabs) re-locks it — a parental-control PIN that
+    /// only had to be entered once per app launch wouldn't stop a kid who's already
+    /// seen the tab switch away and back.
+    @State private var isUnlocked = false
+    @State private var parentalControlsSheetMode: ParentalControlsMode?
 
     public init() {}
 
     public var body: some View {
+        Group {
+            if let pinHash = store.settings.settingsPINHash, !isUnlocked {
+                SettingsPINLockView(expectedHash: pinHash) { isUnlocked = true }
+            } else {
+                settingsForm
+            }
+        }
+        .onDisappear {
+            if store.settings.settingsPINHash != nil { isUnlocked = false }
+        }
+    }
+
+    private var settingsForm: some View {
         Form {
             accountSection
             playerSection
@@ -26,6 +46,7 @@ public struct SettingsView: View {
             uiSection
             sponsorBlockSection
             deArrowSection
+            parentalControlsSection
             #if os(macOS)
             experimentalSection
             #endif
@@ -45,6 +66,29 @@ public struct SettingsView: View {
             GitHubQRView()
         }
         #endif
+        .sheet(item: $parentalControlsSheetMode) { mode in
+            ParentalControlsSheet(mode: mode)
+        }
+    }
+
+    // MARK: - Parental Controls
+
+    private var parentalControlsSection: some View {
+        Section {
+            if store.settings.settingsPINHash == nil {
+                Button("Set PIN") { parentalControlsSheetMode = .set }
+                    .accessibilityIdentifier("settings.setPINButton")
+            } else {
+                Button("Change PIN") { parentalControlsSheetMode = .change }
+                    .accessibilityIdentifier("settings.changePINButton")
+                Button("Remove PIN", role: .destructive) { parentalControlsSheetMode = .remove }
+                    .accessibilityIdentifier("settings.removePINButton")
+            }
+        } header: {
+            Text("Parental Controls")
+        } footer: {
+            Text("When a PIN is set, it must be entered every time this Settings screen is opened.")
+        }
     }
 
     // MARK: - Account
@@ -73,6 +117,12 @@ public struct SettingsView: View {
                     .clipShape(Circle())
                     Text(auth.accountName ?? "Unknown")
                 }
+                NavigationLink {
+                    ChannelSwitcherView()
+                } label: {
+                    LabeledContent("Channel", value: auth.activeChannel?.name ?? "")
+                }
+                .accessibilityIdentifier("settings.channelLink")
                 Button("Sign Out", role: .destructive) { auth.signOut() }
             } else {
                 Button("Sign in with Google") { showSignIn = true }
@@ -94,7 +144,7 @@ public struct SettingsView: View {
             }
 
             #if !os(iOS)
-            Picker("Max Resolution", selection: $store.settings.preferredQuality) {
+            Picker("Default Quality", selection: $store.settings.preferredQuality) {
                 ForEach(AppSettings.VideoQuality.allCases, id: \.self) { q in
                     Text(q.rawValue.capitalized).tag(q)
                 }
@@ -180,17 +230,47 @@ public struct SettingsView: View {
 
     private var generalSection: some View {
         @Bindable var store = store
-        return Section("General") {
+        return Section {
             Picker("Watch History", selection: $store.settings.historyState) {
                 Text("Enabled").tag(AppSettings.HistoryState.enabled)
                 Text("Disabled").tag(AppSettings.HistoryState.disabled)
             }
+            if !LocalWatchHistoryStore.shared.entries.isEmpty {
+                Button("Clear Watch History on This Device", role: .destructive) {
+                    LocalWatchHistoryStore.shared.clear()
+                }
+                .accessibilityIdentifier("settings.clearLocalHistoryButton")
+            }
             Toggle("Sync to iCloud", isOn: $store.settings.iCloudSyncEnabled)
                 .accessibilityIdentifier("settings.iCloudSyncToggle")
+        } header: {
+            Text("General")
+        } footer: {
+            Text(
+                "Watch history is saved on this device. SmartTube also tries to report watches to your YouTube account, but YouTube may not always record them."
+            )
         }
     }
 
     // MARK: - UI
+
+    private enum ThumbnailStyle: Hashable {
+        case standard, highResolution, compact
+    }
+
+    /// UI-only view over the two independent `compactThumbnails` / `highResThumbnails` flags.
+    private var thumbnailStyle: Binding<ThumbnailStyle> {
+        Binding(
+            get: {
+                if store.settings.compactThumbnails { return .compact }
+                return store.settings.highResThumbnails ? .highResolution : .standard
+            },
+            set: { style in
+                store.settings.compactThumbnails = style == .compact
+                store.settings.highResThumbnails = style == .highResolution
+            }
+        )
+    }
 
     private var uiSection: some View {
         @Bindable var store = store
@@ -201,6 +281,35 @@ public struct SettingsView: View {
                 }
             }
             .accessibilityIdentifier("settings.themeRow")
+            Picker("Accent Color", selection: $store.settings.accentColor) {
+                ForEach(AppSettings.AccentColorChoice.allCases, id: \.self) { choice in
+                    Label {
+                        Text(choice.displayName)
+                    } icon: {
+                        choice.swatch
+                    }
+                    .tag(choice)
+                }
+            }
+            .accessibilityIdentifier("settings.accentColorPicker")
+            Picker("Thumbnails", selection: thumbnailStyle) {
+                Text("Standard").tag(ThumbnailStyle.standard)
+                Text("High Resolution").tag(ThumbnailStyle.highResolution)
+                Text("Compact").tag(ThumbnailStyle.compact)
+            }
+            .accessibilityIdentifier("settings.thumbnailStylePicker")
+            #if !os(tvOS)
+            Picker("Columns (Portrait)", selection: $store.settings.gridColumnsPortrait) {
+                ForEach(AppSettings.availableGridColumnCounts, id: \.self) { Text("\($0)").tag($0) }
+            }
+            .disabled(store.settings.compactThumbnails)
+            .accessibilityIdentifier("settings.gridColumnsPortraitPicker")
+            Picker("Columns (Landscape)", selection: $store.settings.gridColumnsLandscape) {
+                ForEach(AppSettings.availableGridColumnCounts, id: \.self) { Text("\($0)").tag($0) }
+            }
+            .disabled(store.settings.compactThumbnails)
+            .accessibilityIdentifier("settings.gridColumnsLandscapePicker")
+            #endif
             Toggle("Hide Shorts", isOn: $store.settings.hideShorts)
                 .accessibilityIdentifier("settings.hideShortsToggle")
             Toggle("Hide Live Shorts", isOn: $store.settings.hideLiveShorts)
@@ -209,7 +318,31 @@ public struct SettingsView: View {
                 .accessibilityIdentifier("settings.hideVideoPremieresToggle")
             Toggle("Per-Device Recommendations", isOn: $store.settings.perDeviceRecommendationsEnabled)
                 .accessibilityIdentifier("settings.perDeviceRecommendationsToggle")
-            Toggle("Compact Thumbnails", isOn: $store.settings.compactThumbnails)
+            Toggle("Hide Watched Videos", isOn: $store.settings.hideWatchedVideos)
+                .accessibilityIdentifier("settings.hideWatchedVideosToggle")
+            if store.settings.hideWatchedVideos {
+                #if os(tvOS)
+                // tvOS has no Stepper.
+                Picker("Watched threshold", selection: $store.settings.hideWatchedThreshold) {
+                    ForEach(Array(stride(from: 50, through: 100, by: 5)), id: \.self) { percent in
+                        Text("\(percent)%").tag(Double(percent) / 100)
+                    }
+                }
+                .accessibilityIdentifier("settings.hideWatchedThresholdStepper")
+                #else
+                Stepper(
+                    "Watched threshold: \(Int(store.settings.hideWatchedThreshold * 100))%",
+                    value: $store.settings.hideWatchedThreshold, in: 0.5...1.0, step: 0.05
+                )
+                .accessibilityIdentifier("settings.hideWatchedThresholdStepper")
+                #endif
+            }
+            #if os(iOS)
+            if #available(iOS 26.0, *) {
+                Toggle("Disable Liquid Glass", isOn: $store.settings.disableLiquidGlass)
+                    .accessibilityIdentifier("settings.disableLiquidGlassToggle")
+            }
+            #endif
             NavigationLink("Visible Sections") {
                 SectionsSettingsView()
                     .environment(store)
@@ -232,10 +365,13 @@ public struct SettingsView: View {
                         Circle()
                             .fill(cat.color)
                             .frame(width: 10, height: 10)
-                        Picker(cat.displayName, selection: Binding(
-                            get: { store.settings.sponsorBlockActions[cat] ?? .nothing },
-                            set: { store.settings.sponsorBlockActions[cat] = $0 }
-                        )) {
+                        Picker(
+                            cat.displayName,
+                            selection: Binding(
+                                get: { store.settings.sponsorBlockActions[cat] ?? .nothing },
+                                set: { store.settings.sponsorBlockActions[cat] = $0 }
+                            )
+                        ) {
                             Text("Skip").tag(AppSettings.SponsorBlockAction.skip)
                             Text("Show Toast").tag(AppSettings.SponsorBlockAction.showToast)
                             Text("Nothing").tag(AppSettings.SponsorBlockAction.nothing)
@@ -290,7 +426,9 @@ public struct SettingsView: View {
         } header: {
             Text("Experimental")
         } footer: {
-            Text("Uses YouTube's official embedded player instead of the direct stream pipeline. Quality selection and downloads are unavailable. Ads will play. Useful for videos that refuse to play via the standard path.")
+            Text(
+                "Uses YouTube's official embedded player instead of the direct stream pipeline. Quality selection is unavailable. Ads will play. Useful for videos that refuse to play via the standard path."
+            )
         }
     }
     #endif
@@ -298,8 +436,14 @@ public struct SettingsView: View {
     // MARK: - About
 
     private var aboutSection: some View {
-        Section {
+        @Bindable var store = store
+        return Section {
             LabeledContent("Version", value: appVersion)
+            Toggle("Disable Analytics & Crash Reporting", isOn: $store.settings.disableAnalytics)
+                .accessibilityIdentifier("settings.disableAnalyticsToggle")
+            Text("Restart the app for this to take effect.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             #if os(tvOS)
             Button {
                 showGithubQR = true
@@ -322,7 +466,7 @@ public struct SettingsView: View {
                     Label("Send Diagnostic Report", systemImage: "ladybug")
                 }
             }
-            .disabled(reportSent)
+            .disabled(reportSent || store.settings.disableAnalytics)
             .accessibilityIdentifier("settings.sendDiagnosticReportButton")
             Button("Reset All Settings", role: .destructive) { store.reset() }
                 .accessibilityIdentifier("settings.resetAllButton")
@@ -401,29 +545,61 @@ struct SectionsSettingsView: View {
 
     private let allSections = BrowseSection.allSections
 
+    /// #156: visible sections in the user's own order (drag-to-reorder below), each
+    /// resolved back to its `BrowseSection` for a title/icon.
+    private var visibleSections: [BrowseSection] {
+        store.settings.enabledSections.compactMap { type in allSections.first { $0.type == type } }
+    }
+
+    private var hiddenSections: [BrowseSection] {
+        allSections.filter { !store.settings.enabledSections.contains($0.type) }
+    }
+
     var body: some View {
         @Bindable var store = store
         List {
-            ForEach(allSections) { section in
-                Toggle(section.title, isOn: Binding(
-                    get: { store.settings.enabledSections.contains(section.type) },
-                    set: { enabled in
-                        if enabled {
-                            if !store.settings.enabledSections.contains(section.type) {
-                                // Insert in canonical order
-                                let ordered = allSections
-                                    .filter { store.settings.enabledSections.contains($0.type) || $0.type == section.type }
-                                    .map { $0.type }
-                                store.settings.enabledSections = ordered
-                            }
-                        } else {
-                            // Don't allow disabling the last section
-                            if store.settings.enabledSections.count > 1 {
-                                store.settings.enabledSections.removeAll { $0 == section.type }
+            Section {
+                ForEach(visibleSections) { section in
+                    HStack {
+                        Text(section.title)
+                        Spacer()
+                        Button {
+                            // Don't allow disabling the last section.
+                            guard store.settings.enabledSections.count > 1 else { return }
+                            store.settings.enabledSections.removeAll { $0 == section.type }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.red)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(store.settings.enabledSections.count <= 1)
+                    }
+                }
+                .onMove { offsets, destination in
+                    store.settings.enabledSections.move(fromOffsets: offsets, toOffset: destination)
+                }
+            } header: {
+                Text("Visible — drag to reorder")
+            }
+
+            if !hiddenSections.isEmpty {
+                Section("Hidden") {
+                    ForEach(hiddenSections) { section in
+                        Button {
+                            // Append to the end of the user's current order, rather than
+                            // recomputing from canonical order, so re-enabling a section
+                            // doesn't discard any reordering already done above.
+                            store.settings.enabledSections.append(section.type)
+                        } label: {
+                            HStack {
+                                Text(section.title).foregroundStyle(.primary)
+                                Spacer()
+                                Image(systemName: "plus.circle.fill").foregroundStyle(.green)
                             }
                         }
+                        .buttonStyle(.plain)
                     }
-                ))
+                }
             }
         }
         .navigationTitle("Visible Sections")
@@ -452,7 +628,8 @@ struct SponsorBlockExcludedChannelsView: View {
                 ContentUnavailableView(
                     "No Excluded Channels",
                     systemImage: "person.crop.circle.badge.minus",
-                    description: Text("Open a channel and tap \u{201C}Exclude from SponsorBlock\u{201D} to add it here.")
+                    description: Text(
+                        "Open a channel and tap \u{201C}Exclude from SponsorBlock\u{201D} to add it here.")
                 )
             } else {
                 ForEach(sortedChannels, id: \.key) { channelId, title in

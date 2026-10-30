@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+
 @testable import SmartTubeIOSCore
 
 // MARK: - ChannelHandleResolutionTests
@@ -73,17 +74,17 @@ struct ChannelHandleResolutionTests {
                 "c4TabbedHeaderRenderer": [
                     "title": "Nieuwsuur",
                     "avatar": ["thumbnails": [["url": "https://example.com/thumb.jpg"]]],
-                    "subscriberCountText": ["simpleText": "1.2M subscribers"]
+                    "subscriberCountText": ["simpleText": "1.2M subscribers"],
                 ]
             ],
             "metadata": [
                 "channelMetadataRenderer": [
                     "externalId": canonicalChannelId,
                     "title": "Nieuwsuur",
-                    "channelUrl": "https://www.youtube.com/channel/\(canonicalChannelId)"
+                    "channelUrl": "https://www.youtube.com/channel/\(canonicalChannelId)",
                 ]
             ],
-            "contents": [String: Any]()  // empty, no video grid needed for channel identity test
+            "contents": [String: Any](),  // empty, no video grid needed for channel identity test
         ]
     }
 
@@ -106,7 +107,7 @@ struct ChannelHandleResolutionTests {
             // resolve_url: unexpected response (no "endpoint" key)
             "navigation/resolve_url": (200, ["error": ["code": 400, "message": "consent required"]]),
             // browse: valid channel response with externalId
-            "browse": (200, Self.channelBrowseResponse)
+            "browse": (200, Self.channelBrowseResponse),
         ]
         let api = makeAPI()
 
@@ -131,13 +132,85 @@ struct ChannelHandleResolutionTests {
     func fetchChannelUsesResolveUrlWhenSuccessful() async throws {
         MultiEndpointURLProtocol.responses = [
             // resolve_url: returns the canonical browseId
-            "navigation/resolve_url": (200, [
-                "endpoint": [
-                    "browseEndpoint": ["browseId": Self.canonicalChannelId]
+            "navigation/resolve_url": (
+                200,
+                [
+                    "endpoint": [
+                        "browseEndpoint": ["browseId": Self.canonicalChannelId]
+                    ]
                 ]
-            ]),
+            ),
             // browse: valid channel response
-            "browse": (200, Self.channelBrowseResponse)
+            "browse": (200, Self.channelBrowseResponse),
+        ]
+        let api = makeAPI()
+
+        let (channel, _) = try await api.fetchChannel(channelId: Self.channelHandle)
+
+        #expect(channel.id == Self.canonicalChannelId)
+        #expect(channel.title == "Nieuwsuur")
+    }
+
+    // MARK: - resolve_url returns urlEndpoint (no browseId) → search fallback
+
+    /// Regression test for GitHub issue #79: `@nieuwsuur` redirects to a legacy
+    /// custom-URL slug ("/Nieuwsuur") rather than a true `@handle`. Confirmed
+    /// live against YouTube: resolve_url returns a `urlEndpoint` (not
+    /// `browseEndpoint`, no error) for this channel, and `/browse` with
+    /// `browseId: "@nieuwsuur"` then returns HTTP 400 — the old fallback
+    /// ("pass the handle through unchanged") does not hold here. The fix adds
+    /// a search-based fallback: search for the handle and match a
+    /// `channelRenderer` result's `canonicalBaseUrl` against it.
+    @Test("fetchChannel(@handle) falls back to search when resolve_url returns a urlEndpoint")
+    func fetchChannelFallsBackToSearchWhenResolveUrlReturnsUrlEndpoint() async throws {
+        let searchResponse: [String: Any] = [
+            "contents": [
+                "twoColumnSearchResultsRenderer": [
+                    "primaryContents": [
+                        "sectionListRenderer": [
+                            "contents": [
+                                [
+                                    "itemSectionRenderer": [
+                                        "contents": [
+                                            [
+                                                "channelRenderer": [
+                                                    "channelId": Self.canonicalChannelId,
+                                                    "title": ["simpleText": "Nieuwsuur"],
+                                                    "longBylineText": [
+                                                        "runs": [
+                                                            [
+                                                                "navigationEndpoint": [
+                                                                    "browseEndpoint": [
+                                                                        "browseId": Self.canonicalChannelId,
+                                                                        "canonicalBaseUrl": "/@nieuwsuur",
+                                                                    ]
+                                                                ]
+                                                            ]
+                                                        ]
+                                                    ],
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        MultiEndpointURLProtocol.responses = [
+            // resolve_url: urlEndpoint instead of browseEndpoint — no browseId, no error.
+            "navigation/resolve_url": (
+                200,
+                [
+                    "endpoint": [
+                        "urlEndpoint": ["url": "https://www.youtube.com/Nieuwsuur"]
+                    ]
+                ]
+            ),
+            "search": (200, searchResponse),
+            "browse": (200, Self.channelBrowseResponse),
         ]
         let api = makeAPI()
 
@@ -157,7 +230,7 @@ struct ChannelHandleResolutionTests {
         // return HTTP 500 which would surface as an APIError and fail the test.
         MultiEndpointURLProtocol.responses = [
             "navigation/resolve_url": (500, ["error": "should not be called"]),
-            "browse": (200, Self.channelBrowseResponse)
+            "browse": (200, Self.channelBrowseResponse),
         ]
         let api = makeAPI()
 

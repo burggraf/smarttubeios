@@ -52,37 +52,39 @@ public struct BrowseSection: Identifiable, Hashable, Sendable {
     public var type: SectionType
 
     public enum SectionType: String, CaseIterable, Codable, Sendable {
-        case home          = "home"
-        case recommended   = "recommended"
+        case home = "home"
+        case recommended = "recommended"
         case subscriptions = "subscriptions"
-        case history       = "history"
-        case playlists     = "playlists"
-        case channels      = "channels"
-        case shorts        = "shorts"
-        case music         = "music"
-        case news          = "news"
-        case gaming        = "gaming"
-        case live          = "live"
-        case sports        = "sports"
-        case settings      = "settings"
+        case history = "history"
+        case playlists = "playlists"
+        case channels = "channels"
+        case shorts = "shorts"
+        case music = "music"
+        case news = "news"
+        case gaming = "gaming"
+        case live = "live"
+        case sports = "sports"
+        case watchLater = "watchLater"
+        case settings = "settings"
 
         /// Canonical display title — single source of truth used by defaultSections,
         /// allSections, and any code that needs a localised label for a section type.
         public var defaultTitle: String {
             switch self {
-            case .home:          return "Home"
-            case .recommended:   return "Recommended"
+            case .home: return "Home"
+            case .recommended: return "Recommended"
             case .subscriptions: return "Subscriptions"
-            case .history:       return "History"
-            case .playlists:     return "Playlists"
-            case .channels:      return "Channels"
-            case .shorts:        return "Shorts"
-            case .music:         return "Music"
-            case .news:          return "News"
-            case .gaming:        return "Gaming"
-            case .live:          return "Live"
-            case .sports:        return "Sports"
-            case .settings:      return "Settings"
+            case .history: return "History"
+            case .playlists: return "Playlists"
+            case .channels: return "Channels"
+            case .shorts: return "Shorts"
+            case .music: return "Music"
+            case .news: return "News"
+            case .gaming: return "Gaming"
+            case .live: return "Live"
+            case .sports: return "Sports"
+            case .watchLater: return "Watch Later"
+            case .settings: return "Settings"
             }
         }
     }
@@ -95,9 +97,9 @@ public struct BrowseSection: Identifiable, Hashable, Sendable {
 
     /// Convenience: creates a section whose id and title are derived from the type.
     public init(type: SectionType) {
-        self.id    = type.rawValue
+        self.id = type.rawValue
         self.title = type.defaultTitle
-        self.type  = type
+        self.type = type
     }
 
     public static let defaultSections: [BrowseSection] = [
@@ -109,15 +111,17 @@ public struct BrowseSection: Identifiable, Hashable, Sendable {
     ]
 
     /// All known sections including extended categories (music, gaming, etc.).
-    public static let allSections: [BrowseSection] = defaultSections + [
-        BrowseSection(type: .recommended),
-        BrowseSection(type: .shorts),
-        BrowseSection(type: .music),
-        BrowseSection(type: .gaming),
-        BrowseSection(type: .news),
-        BrowseSection(type: .live),
-        BrowseSection(type: .sports),
-    ]
+    public static let allSections: [BrowseSection] =
+        defaultSections + [
+            BrowseSection(type: .recommended),
+            BrowseSection(type: .shorts),
+            BrowseSection(type: .music),
+            BrowseSection(type: .gaming),
+            BrowseSection(type: .news),
+            BrowseSection(type: .live),
+            BrowseSection(type: .sports),
+            BrowseSection(type: .watchLater),
+        ]
 }
 
 // MARK: - SearchResult
@@ -139,7 +143,7 @@ public struct SearchResult: Identifiable, Sendable {
 // MARK: - Channel
 
 public struct Channel: Identifiable, Hashable, Codable, Sendable {
-    public let id: String   // channelId
+    public let id: String  // channelId
     public var title: String
     public var description: String?
     public var thumbnailURL: URL?
@@ -191,7 +195,10 @@ public struct VideoFormat: Identifiable, Hashable, Sendable {
     public var url: URL?
     public var bitrate: Int?
 
-    public init(id: UUID = UUID(), label: String, width: Int, height: Int, fps: Int, mimeType: String, url: URL? = nil, bitrate: Int? = nil) {
+    public init(
+        id: UUID = UUID(), label: String, width: Int, height: Int, fps: Int, mimeType: String, url: URL? = nil,
+        bitrate: Int? = nil
+    ) {
         self.id = id
         self.label = label
         self.width = width
@@ -210,7 +217,7 @@ public struct VideoFormat: Identifiable, Hashable, Sendable {
         if mimeType.contains("vp09") { return "VP9" }
         if mimeType.contains("av01") { return "AV1" }
         if mimeType.contains("hvc1") || mimeType.contains("hev1") { return "HEVC" }
-        if mimeType.contains("mp4")  { return "mp4" }
+        if mimeType.contains("mp4") { return "mp4" }
         if mimeType.contains("webm") { return "webm" }
         return ""
     }
@@ -224,23 +231,31 @@ public struct SponsorSegment: Identifiable, Codable, Equatable, Sendable {
     public var start: TimeInterval
     public var end: TimeInterval
     public var category: Category
+    /// The SponsorBlock API's own segment identifier (its `"UUID"` field) — an
+    /// arbitrary string, not a Swift `UUID`, so it's kept separate from `id` (which
+    /// is just a local SwiftUI-identity token, `Identifiable`-generated per fetch).
+    /// `nil` for segments not sourced from a live API response (e.g. UI-test-injected
+    /// synthetic segments). Required by `SponsorBlockService.reportIncorrect(uuid:)`
+    /// (#67) — voting on a segment needs the API's own identifier, not ours.
+    public var apiUUID: String?
 
     public enum Category: String, Codable, CaseIterable, Sendable {
-        case sponsor       = "sponsor"
-        case selfPromo     = "selfpromo"
-        case interaction   = "interaction"
-        case intro         = "intro"
-        case outro         = "outro"
-        case preview       = "preview"
-        case filler        = "filler"
+        case sponsor = "sponsor"
+        case selfPromo = "selfpromo"
+        case interaction = "interaction"
+        case intro = "intro"
+        case outro = "outro"
+        case preview = "preview"
+        case filler = "filler"
         case musicOfftopic = "music_offtopic"
-        case poiHighlight  = "poi_highlight"
+        case poiHighlight = "poi_highlight"
     }
 
-    public init(id: UUID = UUID(), start: TimeInterval, end: TimeInterval, category: Category) {
+    public init(id: UUID = UUID(), start: TimeInterval, end: TimeInterval, category: Category, apiUUID: String? = nil) {
         self.id = id
         self.start = start
         self.end = end
         self.category = category
+        self.apiUUID = apiUUID
     }
 }

@@ -1,6 +1,7 @@
 #if !os(tvOS)
 import Foundation
 import Testing
+import SmartTubeIOSCore
 @testable import SmartTubeIOS
 
 @Suite("ShortsEmbedJS")
@@ -13,19 +14,28 @@ struct ShortsEmbedJSTests {
         #expect(url.path == "/embed/abc123XYZ_-")
     }
 
-    @Test("embedURL includes the expected query items")
+    @Test("embedURL supplies autoplay parameters and hides YouTube chrome for native controls")
     func embedURLHasExpectedQueryItems() {
         let url = ShortsEmbedJS.embedURL(videoId: "abc123XYZ_-", startTime: 5)
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
         let dict = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value) })
         #expect(dict["autoplay"] == "1")
         #expect(dict["mute"] == "1")
-        #expect(dict["controls"] == "1")
+        #expect(dict["controls"] == "0")
         #expect(dict["playsinline"] == "1")
         #expect(dict["rel"] == "0")
         #expect(dict["iv_load_policy"] == "3")
         #expect(dict["start"] == "5")
         #expect(dict["origin"] == "https://www.example.com")
+    }
+
+    @Test("The spike and production embed builders use identical playback parameters")
+    func embedBuildersStayInSync() {
+        #expect(
+            ShortsEmbedJS.embedURL(videoId: "abc123XYZ_-", startTime: 12.9)
+                == ShortsEmbedURL.embedURL(videoId: "abc123XYZ_-", startTime: 12.9))
+        #expect(ShortsEmbedJS.playerControlsHiderJS.contains("body *{visibility:hidden!important}"))
+        #expect(ShortsEmbedJS.playerControlsHiderJS.contains("video{visibility:visible!important;"))
     }
 
     @Test("embedURL truncates a fractional startTime to whole seconds")

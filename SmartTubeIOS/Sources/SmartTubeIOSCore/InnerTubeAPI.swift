@@ -1,6 +1,7 @@
 import Foundation
-import os
 import Network
+import os
+
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -27,6 +28,8 @@ public actor InnerTubeAPI {
     /// SAPISID cookie value from YouTube.com web session (set via OAuthLogin/MergeSession).
     /// Used by postWebCreator to compute SAPISIDHASH for WEB_CREATOR requests on www.youtube.com.
     var sapisid: String?
+    /// Selected Brand Account, sent as `X-Goog-Pageid` on authenticated requests.
+    let activeChannel: ActiveChannel
 
     // MARK: - signatureTimestamp (STS) cache
     //
@@ -185,6 +188,20 @@ public actor InnerTubeAPI {
         ]
     ]
 
+    /// visionOS context mirrored from current yt-dlp. Kept separate from the
+    /// running platform intentionally: this is an InnerTube client identity.
+    let visionOSClientContext: [String: Any] = [
+        "client": [
+            "clientName": InnerTubeClients.VisionOS.name,
+            "clientVersion": InnerTubeClients.VisionOS.version,
+            "deviceMake": "Apple",
+            "deviceModel": "RealityDevice17,1",
+            "userAgent": InnerTubeClients.VisionOS.userAgent,
+            "osName": "visionOS",
+            "osVersion": "26.5.23O471",
+        ]
+    ]
+
     /// The WEB_EMBEDDED_PLAYER client context for embedded iframe player requests.
     /// Replaces the deprecated TVHTML5_SIMPLY_EMBEDDED_PLAYER (nameID=85). YouTube blocked
     /// nameID=85 in 2026; yt-dlp removed `tv_embedded` and now uses `web_embedded` (nameID=56).
@@ -246,7 +263,7 @@ public actor InnerTubeAPI {
     // Public InnerTube API key embedded in YouTube's own web client JS — not a developer secret.
     // nosec: false positive — this key is published by Google in youtube.com/s/player JS.
     // Used only for unauthenticated requests (aligned to Android RetrofitOkHttpHelper pattern).
-    let apiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8" // gitleaks:allow
+    let apiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"  // gitleaks:allow
     // Note: TV key (AIzaSyDCU8...) is defined in Android as API_KEY_OLD and never used.
 
     /// Request timeout for all InnerTube API calls (NW-4-FIX).
@@ -254,7 +271,10 @@ public actor InnerTubeAPI {
     /// Firebase issue 709b3e91 showed a 2m48s hang when this was left at the OS default.
     static let requestTimeoutInterval: TimeInterval = 30
 
-    public init(authToken: String? = nil, poTokenProvider: (any PoTokenProvider)? = nil) {
+    public init(
+        authToken: String? = nil, poTokenProvider: (any PoTokenProvider)? = nil,
+        activeChannel: ActiveChannel = .shared
+    ) {
         let config = URLSessionConfiguration.default
         // NW-4-FIX: 30 s request timeout. Slow/throttled youtubei.googleapis.com requests
         // previously hung for over 2 minutes (Firebase issue 709b3e91) because the OS default
@@ -266,6 +286,7 @@ public actor InnerTubeAPI {
         self.session = URLSession(configuration: config)
         self.authToken = authToken
         self.poTokenProvider = poTokenProvider
+        self.activeChannel = activeChannel
         // Start observing network path changes so visitorData is cleared on network transitions.
         // Callbacks arrive on pathMonitor's private queue; actor re-entry via Task is safe.
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -276,10 +297,11 @@ public actor InnerTubeAPI {
 
     /// Package-internal initializer for testing only.
     /// Accepts a custom `URLSession` so tests can inject a mock via `URLProtocol`.
-    init(authToken: String?, session: URLSession) {
+    init(authToken: String?, session: URLSession, activeChannel: ActiveChannel = ActiveChannel()) {
         self.session = session
         self.authToken = authToken
         self.poTokenProvider = nil
+        self.activeChannel = activeChannel
     }
 
     // MARK: - Private: Network path handler

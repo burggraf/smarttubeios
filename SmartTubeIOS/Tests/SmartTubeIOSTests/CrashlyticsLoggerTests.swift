@@ -1,6 +1,7 @@
 import FirebaseCore
 import Foundation
 import Testing
+
 @testable import SmartTubeIOS
 
 @Suite("Logging without Firebase configuration")

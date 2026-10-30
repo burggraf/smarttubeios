@@ -1,12 +1,12 @@
-import SwiftUI
 import AVFoundation
 import AVKit
 import SmartTubeIOSCore
+import SwiftUI
 import os
+
 #if canImport(UIKit)
 import UIKit
 #endif
-
 
 // MARK: - PlayerView
 //
@@ -42,7 +42,9 @@ public struct PlayerView: View {
     @State var isTransitioning = false
     @State var channelDestination: ChannelDestination?
     #if !os(tvOS)
+    #if ENABLE_DOWNLOADS
     @State var downloadService: VideoDownloadService
+    #endif
     @State var downloadAlertItem: DownloadAlertItem?
     #endif
     #if os(iOS)
@@ -96,6 +98,8 @@ public struct PlayerView: View {
     @FocusState var qualityPickerFocused: Bool
     @FocusState var speedPickerFocused: Bool
     @FocusState var sleepTimerPickerFocused: Bool
+    @FocusState var captionPickerFocused: Bool
+    @FocusState var audioTrackPickerFocused: Bool
     @FocusState var skipToastButtonFocused: Bool
     #endif
 
@@ -114,7 +118,9 @@ public struct PlayerView: View {
         _vm = State(initialValue: PlaybackViewModel(api: api))
         #endif
         #if !os(tvOS)
+        #if ENABLE_DOWNLOADS
         _downloadService = State(initialValue: VideoDownloadService(api: api))
+        #endif
         #endif
     }
 
@@ -122,11 +128,9 @@ public struct PlayerView: View {
         bodyWithLifecycleModifiers
     }
 
-
     // MARK: - Lifecycle + full player body
     // bodyWithLifecycleModifiers, makeControlsOverlay
     // → PlayerView+Lifecycle.swift
-
 
     // MARK: - Control elements
     // PlayerControlsOverlay (playPauseButton, seekButton, progressBar, etc.)

@@ -1,3 +1,7 @@
+# Claude Code local overrides
+.claude/settings.local.json
+CLAUDE.local.md
+
 # macOS
 .DS_Store
 .AppleDouble
@@ -20,14 +24,15 @@ DerivedData/
 # Swift Package Manager
 .build/
 .swiftpm/xcode/
-*.resolved
-# Keep Package.resolved when using SPM directly:
-# !Package.resolved
 
 # CocoaPods
 Pods/
-*.xcworkspace/
+*.xcworkspace/*
 !*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata
+!*.xcworkspace/xcshareddata/*
+!*.xcworkspace/xcshareddata/swiftpm
+!*.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
 # Fastlane
 fastlane/report.xml
@@ -43,10 +48,11 @@ fastlane/test_output
 AuthKey_*.p8
 
 # Private signing config (copy from SmartTubeIOSPrivate via setup.sh)
-SmartTubeApp/Config/Secrets.xcconfig
-
+**/Secrets.xcconfig
+!**/Secrets.xcconfig.example
 # Firebase config (copy from SmartTubeIOSPrivate via setup.sh)
-SmartTubeApp/SmartTubeApp/GoogleService-Info.plist
+**/GoogleService-Info.plist
+!**/GoogleService-Info.plist.example
 
 # Simulator
 *.app
@@ -61,6 +67,7 @@ deps.txt
 logcat.txt
 /releases
 /files
+.screenshot-review/
 /misc
 /other
 /TODO.txt

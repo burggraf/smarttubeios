@@ -1,16 +1,17 @@
 import Foundation
 import Testing
+
 @testable import SmartTubeIOS
 
 /// Intercepts only the device-flow endpoints and credential discovery. No user
 /// credentials, Google authorization, or live network are used by these tests.
 private final class DeviceFlowURLProtocol: URLProtocol, @unchecked Sendable {
-    override class func canInit(with request: URLRequest) -> Bool {
+    override static func canInit(with request: URLRequest) -> Bool {
         request.url?.host == "oauth2.googleapis.com"
             || request.url?.absoluteString == "https://www.youtube.com/tv"
     }
 
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override static func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         let body: Data
@@ -18,11 +19,12 @@ private final class DeviceFlowURLProtocol: URLProtocol, @unchecked Sendable {
         switch request.url?.path {
         case "/device/code":
             status = 200
-            body = Data("""
-            {"device_code":"test-device-code","user_code":"TEST-CODE",\
-            "verification_url":"https://www.google.com/device",\
-            "expires_in":900,"interval":3600}
-            """.utf8)
+            body = Data(
+                """
+                {"device_code":"test-device-code","user_code":"TEST-CODE",\
+                "verification_url":"https://www.google.com/device",\
+                "expires_in":900,"interval":3600}
+                """.utf8)
         case "/token":
             status = 428
             body = Data(#"{"error":"authorization_pending"}"#.utf8)
@@ -32,8 +34,14 @@ private final class DeviceFlowURLProtocol: URLProtocol, @unchecked Sendable {
             status = 200
             body = Data()
         }
-        let response = HTTPURLResponse(url: request.url!, statusCode: status,
-                                       httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        guard let url = request.url,
+            let response = HTTPURLResponse(
+                url: url, statusCode: status,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"])
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
@@ -58,7 +66,9 @@ struct AuthServiceForegroundTests {
 
         auth.handleForeground()
 
-        #expect(!original.isCancelled, "An approved code can be consumed by the in-flight request; cancelling it can lose its token response")
+        #expect(
+            !original.isCancelled,
+            "An approved code can be consumed by the in-flight request; cancelling it can lose its token response")
         #expect(auth.pollTask == original, "Foregrounding must not create a competing token exchange")
         #expect(auth.error == nil)
     }

@@ -1,6 +1,6 @@
 import AVFoundation
-import os
 import SmartTubeIOSCore
+import os
 
 private let qualityLog = CrashlyticsLogger(category: "Quality")
 
@@ -10,7 +10,9 @@ extension PlaybackViewModel {
 
     public func selectFormat(_ format: VideoFormat?) {
         if let fmt = format {
-            qualityLog.notice("[quality] selectFormat → \(fmt.qualityLabel) (\(fmt.codecShortLabel)) \(fmt.width)×\(fmt.height)@\(fmt.fps)fps")
+            qualityLog.notice(
+                "[quality] selectFormat → \(fmt.qualityLabel) (\(fmt.codecShortLabel)) \(fmt.width)×\(fmt.height)@\(fmt.fps)fps"
+            )
         } else {
             qualityLog.notice("[quality] selectFormat → Auto (clearing selectedFormat)")
         }
@@ -19,6 +21,12 @@ extension PlaybackViewModel {
         // without waiting for the next periodic-observer tick (which may not fire
         // while the player is loading the replacement item).
         if statsForNerdsVisible { updateStatsSnapshot() }
+    }
+
+    /// Quality cap for recovery/stream-selection paths: the per-video pick when
+    /// one exists, otherwise the persisted default (`settings.preferredQuality`).
+    var effectiveQuality: AppSettings.VideoQuality {
+        qualityManager.effectiveQuality
     }
 
     func reloadHLSItem(seekTo time: TimeInterval, quality: AppSettings.VideoQuality) async {

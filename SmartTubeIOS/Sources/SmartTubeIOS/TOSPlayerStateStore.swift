@@ -84,14 +84,80 @@ public final class TOSPlayerStateStore {
 
     // MARK: - Init
 
-    public init() {}
+    public init() {
+        // Test-only: listen for the "takesnapshot" Darwin notification so
+        // XCUITest can ask the running app to capture the WKWebView's
+        // rendered content and write it to a known file path. The test
+        // simulator's WKWebView is in a hidden state when the inline
+        // presentation path is used (the SwiftUI `.overlay` puts the
+        // WKWebView in a layer that iOS marks `document.hidden=true`),
+        // so `XCUIScreen.main.screenshot()` returns a black image.
+        // `webView.takeSnapshot` bypasses view visibility — it captures
+        // the actual rendered web content. The test posts
+        // `com.void.smarttube.tosplayer.takesnapshot`, waits for
+        // `com.void.smarttube.tosplayer.snapshot.taken` (posted by
+        // `TOSPlayerViewModel.takeSnapshot`), then reads the file.
+        Self.installSnapshotListener()
+    }
+
+    /// One-time (per app launch) install of the Darwin notification observer
+    /// for the test-only takesnapshot path. Idempotent.
+    private static var hasInstalledSnapshotListener = false
+    private static func installSnapshotListener() {
+        guard !hasInstalledSnapshotListener else { return }
+        hasInstalledSnapshotListener = true
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        // Use a sentinel object as the observer — the actual work happens
+        // by reading `TOSPlayerStateStore.activeStore` (set on play()), so
+        // we don't need to keep a strong reference to any particular store.
+        let observer = Unmanaged.passRetained(SnapshotObserver()).toOpaque()
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { (_, _, name, _, _) in
+                let path = "/tmp/smarttube-logs/tos_snapshot.png"
+                if let vm = TOSPlayerStateStore.activeStore?.vm {
+                    tosStoreLog.notice("[snapshot] takesnapshot received — capturing to \(path, privacy: .public)")
+                    vm.takeSnapshot(to: path)
+                } else {
+                    tosStoreLog.notice(
+                        "[snapshot] takesnapshot received but no active vm — posting snapshot.taken anyway")
+                    CFNotificationCenterPostNotification(
+                        CFNotificationCenterGetDarwinNotifyCenter(),
+                        CFNotificationName("com.void.smarttube.tosplayer.snapshot.taken" as CFString),
+                        nil, nil, true
+                    )
+                }
+            },
+            "com.void.smarttube.tosplayer.takesnapshot" as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    /// Tracks the most-recently-active TOSPlayerStateStore so the snapshot
+    /// observer (a global singleton) can find the current vm. Multiple stores
+    /// could exist in theory (tests / multi-window), but in practice the app
+    /// has a single one in the environment.
+    fileprivate static var activeStore: TOSPlayerStateStore?
+    private func setActive() { Self.activeStore = self }
+    private func setInactive() {
+        if Self.activeStore === self { Self.activeStore = nil }
+    }
 
     // MARK: - Actions
 
     /// Load `video` and present the TOS player full-screen.
     /// If the same video is already loaded and playing, just expands.
-    public func play(video: Video, api: InnerTubeAPI) {
-        tosStoreLog.notice("[TOSPlayerStateStore] play — id=\(video.id) currentPresentation=\(String(describing: self.presentation))")
+    /// `incognito` (#94) is not honored when re-expanding an already-loaded video —
+    /// its vm was already created with whatever incognito value applied at that time.
+    public func play(video: Video, api: InnerTubeAPI, incognito: Bool = false) {
+        tosStoreLog.notice(
+            "[TOSPlayerStateStore] play — id=\(video.id) currentPresentation=\(String(describing: self.presentation))")
+
+        // Whether the full-screen player is already showing (swipe navigation, or a deep
+        // link / widget tap while watching): its view is not re-created for the new vm.
+        let playerAlreadyOnScreen = presentation == .fullScreen && vm != nil
 
         if vm?.videoId == video.id, presentation == .miniPlayer {
             // Same video minimized — just re-expand.
@@ -118,7 +184,10 @@ public final class TOSPlayerStateStore {
         }
 
         seenVideoIds.insert(video.id)
-        let newVM = TOSPlayerViewModel(videoId: video.id, title: video.title, channelId: video.channelId, playlistId: video.playlistId, playlistIndex: video.playlistIndex, startTime: 0, api: api)
+        let newVM = TOSPlayerViewModel(
+            videoId: video.id, title: video.title, channelId: video.channelId, channelTitle: video.channelTitle,
+            thumbnailURL: video.thumbnailURL, playlistId: video.playlistId, playlistIndex: video.playlistIndex,
+            startTime: 0, isIncognito: incognito, api: api)
         newVM.seenVideoIds = seenVideoIds
         newVM.setNavigationContext(hasPrevious: !history.isEmpty)
         // Wire swipe-navigation callbacks here (not in TOSPlayerView.onAppear) so
@@ -138,13 +207,17 @@ public final class TOSPlayerStateStore {
         self.vm = newVM
         self.currentVideo = video
         self.presentation = .fullScreen
+        setActive()
         tosStoreLog.notice("[TOSPlayerStateStore] play — presentation set to .fullScreen, vm created for \(video.id)")
-        // When swipe navigation creates a new vm while the fullscreen player is
-        // already on screen, TOSPlayerView's .onAppear does NOT re-fire (it fires
-        // only once per view lifetime). Call startIfNeeded() here so the new
-        // vm's embed loads immediately. The .onAppear guard (hasStartedLoading)
-        // makes this idempotent for the first-open case.
-        newVM.startIfNeeded()
+        // When a new vm replaces the one on an already-presented full-screen player,
+        // YouTubeWebPlayerView is not re-created, so its window-ready callback (the only
+        // trigger that loads the embed since startIfNeeded() became a no-op) never fires
+        // for the new vm, leaving a black player. Start it directly; the method's own
+        // delay and hasStartedLoading guard keep this safe. A first open still waits for
+        // the window-ready callback (the cover animation must finish first).
+        if playerAlreadyOnScreen {
+            newVM.startIfNeededWhenWindowReady()
+        }
     }
 
     /// Pops and returns the most recent video from the swipe-navigation history,
@@ -156,13 +229,15 @@ public final class TOSPlayerStateStore {
     /// Collapse the full-screen player to the mini-player bar.
     /// The WKWebView keeps running — audio continues.
     public func minimize() {
-        tosStoreLog.notice("[TOSPlayerStateStore] minimize — currentPresentation=\(String(describing: self.presentation))")
+        tosStoreLog.notice(
+            "[TOSPlayerStateStore] minimize — currentPresentation=\(String(describing: self.presentation))")
         guard presentation == .fullScreen else { return }
         let wasActive = vm?.playerState == .playing || vm?.playerState == .buffering
         presentation = .miniPlayer
         let action = dismissPlayerAction
         dismissPlayerAction = nil
-        tosStoreLog.notice("[TOSPlayerStateStore] minimize — presentation set to .miniPlayer, dismissPlayerAction=\(action != nil)")
+        tosStoreLog.notice(
+            "[TOSPlayerStateStore] minimize — presentation set to .miniPlayer, dismissPlayerAction=\(action != nil)")
         action?()
 
         // Defense-in-depth: TOSMiniPlayerLayerView transplants the WKWebView into the
@@ -178,7 +253,9 @@ public final class TOSPlayerStateStore {
             guard let self, self.presentation == .miniPlayer, self.vm === resumeVM else { return }
             let state = resumeVM?.playerState
             if state != .playing, state != .buffering {
-                tosStoreLog.notice("[TOSPlayerStateStore] minimize — playback did not resume (state=\(String(describing: state))), calling vm.play()")
+                tosStoreLog.notice(
+                    "[TOSPlayerStateStore] minimize — playback did not resume (state=\(String(describing: state))), calling vm.play()"
+                )
                 resumeVM?.play()
             }
         }
@@ -186,7 +263,8 @@ public final class TOSPlayerStateStore {
 
     /// Expand the mini-player back to full-screen.
     public func expand() {
-        tosStoreLog.notice("[TOSPlayerStateStore] expand — currentPresentation=\(String(describing: self.presentation))")
+        tosStoreLog.notice(
+            "[TOSPlayerStateStore] expand — currentPresentation=\(String(describing: self.presentation))")
         guard presentation == .miniPlayer else { return }
         presentation = .fullScreen
         tosStoreLog.notice("[TOSPlayerStateStore] expand — presentation set to .fullScreen")
@@ -197,15 +275,19 @@ public final class TOSPlayerStateStore {
         tosStoreLog.notice("[TOSPlayerStateStore] stop — currentPresentation=\(String(describing: self.presentation))")
         vm?.pause()
         vm?.saveProgress()
+        vm?.clearNowPlayingInfo()
         vm?.onPlayNext = nil
         vm?.onPlayPrevious = nil
         vm = nil
         currentVideo = nil
         presentation = .hidden
         seenVideoIds = []
+        setInactive()
         let action = dismissPlayerAction
         dismissPlayerAction = nil
-        tosStoreLog.notice("[TOSPlayerStateStore] stop — presentation set to .hidden, vm released, dismissPlayerAction=\(action != nil)")
+        tosStoreLog.notice(
+            "[TOSPlayerStateStore] stop — presentation set to .hidden, vm released, dismissPlayerAction=\(action != nil)"
+        )
         action?()
     }
 
@@ -216,4 +298,15 @@ public final class TOSPlayerStateStore {
         fallbackVideoId = videoId
     }
 }
-#endif // os(iOS)
+
+// MARK: - SnapshotObserver (test-only)
+//
+// Sentinel object that the Darwin notification observer holds a strong reference
+// to (via `Unmanaged.passRetained`). The observer closure itself doesn't use
+// the observer — it looks up the active TOSPlayerStateStore via the static
+// `activeStore` property — but CFNotificationCenter requires a non-nil
+// observer pointer to be passed to `CFNotificationCenterAddObserver`. Without
+// this object, the observer pattern leaks / misbehaves.
+private final class SnapshotObserver: NSObject {}
+
+#endif  // os(iOS)

@@ -1,3 +1,5 @@
+// Downloading is compiled out (App Store guideline 5.2.3). Define ENABLE_DOWNLOADS to build it.
+#if ENABLE_DOWNLOADS
 import Foundation
 import Observation
 
@@ -114,7 +116,8 @@ public final class DownloadStore {
 
     private func loadManifest() {
         guard let data = try? Data(contentsOf: manifestURL),
-              let decoded = try? JSONDecoder().decode([DownloadedVideo].self, from: data) else {
+            let decoded = try? JSONDecoder().decode([DownloadedVideo].self, from: data)
+        else {
             return
         }
         // Migrate entries whose stored fileURL no longer exists on disk.
@@ -156,3 +159,4 @@ public final class DownloadStore {
         try? data.write(to: manifestURL, options: .atomic)
     }
 }
+#endif  // ENABLE_DOWNLOADS

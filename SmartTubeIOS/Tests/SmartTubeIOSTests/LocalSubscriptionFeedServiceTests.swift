@@ -1,10 +1,11 @@
 import Foundation
 import Testing
+
 @testable import SmartTubeIOSCore
 
 // MARK: - LocalSubscriptionFeedServiceTests
 
-@Suite("Local Subscription Feed Service")
+@Suite("Local Subscription Feed Service", .serialized)
 @MainActor
 struct LocalSubscriptionFeedServiceTests {
 
@@ -24,8 +25,7 @@ struct LocalSubscriptionFeedServiceTests {
 
     /// Builds a `LocalSubscriptionFeedService` backed by `RouterURLProtocol`,
     /// seeding its routes for this test. `RouterURLProtocol.routes` is a
-    /// shared static — callers must clear it (e.g. `defer { RouterURLProtocol.routes = [:] }`)
-    /// so a route set here can't leak into a concurrently-running test.
+    /// shared static, so this suite serializes its tests and each test clears its routes.
     private func makeService(with routes: [String: Data]) -> LocalSubscriptionFeedService {
         RouterURLProtocol.routes = routes
         let config = URLSessionConfiguration.ephemeral
@@ -87,11 +87,12 @@ struct LocalSubscriptionFeedServiceTests {
         await store.follow(channel)
 
         // Use a service with a session that will fail all RSS requests
-        let session = URLSession(configuration: {
-            let config = URLSessionConfiguration.ephemeral
-            config.protocolClasses = [AlwaysFailURLProtocol.self]
-            return config
-        }())
+        let session = URLSession(
+            configuration: {
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [AlwaysFailURLProtocol.self]
+                return config
+            }())
         let service = LocalSubscriptionFeedService(session: session)
         let videos = await service.fetchFeed(store: store, cache: cache, api: api)
 
@@ -133,10 +134,12 @@ struct LocalSubscriptionFeedServiceTests {
         await store.follow(makeChannel(id: "UCsort"))
 
         // Cache stores them with older first — arrival order, not newest-first.
-        let older = Video(id: "vid-old", title: "Old", channelTitle: "C",
-                          publishedAt: Date(timeIntervalSince1970: 1_000_000))
-        let newer = Video(id: "vid-new", title: "New", channelTitle: "C",
-                          publishedAt: Date(timeIntervalSince1970: 2_000_000))
+        let older = Video(
+            id: "vid-old", title: "Old", channelTitle: "C",
+            publishedAt: Date(timeIntervalSince1970: 1_000_000))
+        let newer = Video(
+            id: "vid-new", title: "New", channelTitle: "C",
+            publishedAt: Date(timeIntervalSince1970: 2_000_000))
         await cache.store(videos: [older, newer], for: "UCsort")
 
         let service = LocalSubscriptionFeedService()
@@ -159,10 +162,10 @@ struct LocalSubscriptionFeedServiceTests {
         await store.follow(makeChannel(id: channelId))
 
         let uploadsXML = rssXML(channelId: channelId, videoIds: ["vid1", "vid2"])
-        let shortsXML  = rssXML(channelId: channelId, videoIds: ["vid2"])
+        let shortsXML = rssXML(channelId: channelId, videoIds: ["vid2"])
 
         let uploadsURL = YouTubeRSS.feedURL(for: channelId).absoluteString
-        let shortsURL  = YouTubeRSS.shortsFeedURL(for: channelId).absoluteString
+        let shortsURL = YouTubeRSS.shortsFeedURL(for: channelId).absoluteString
 
         let service = makeService(with: [uploadsURL: uploadsXML, shortsURL: shortsXML])
         defer { RouterURLProtocol.routes = [:] }
@@ -171,7 +174,7 @@ struct LocalSubscriptionFeedServiceTests {
         let vid1 = videos.first(where: { $0.id == "vid1" })
         let vid2 = videos.first(where: { $0.id == "vid2" })
         #expect(vid1?.isShort == false, "vid1 should not be marked as Short")
-        #expect(vid2?.isShort == true,  "vid2 appears in Shorts feed — should be marked isShort")
+        #expect(vid2?.isShort == true, "vid2 appears in Shorts feed — should be marked isShort")
     }
 
     @Test("RSS: nil Shorts playlist feed does not crash and leaves isShort unchanged")
@@ -206,13 +209,13 @@ struct LocalSubscriptionFeedServiceTests {
             """
         }.joined(separator: "\n")
         let xml = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
-              xmlns="http://www.w3.org/2005/Atom">
-          <title>Channel</title>
-          \(entries)
-        </feed>
-        """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+                  xmlns="http://www.w3.org/2005/Atom">
+              <title>Channel</title>
+              \(entries)
+            </feed>
+            """
         return Data(xml.utf8)
     }
 }
@@ -244,8 +247,9 @@ private final class RouterURLProtocol: URLProtocol {
     override func startLoading() {
         let key = request.url?.absoluteString ?? ""
         if let data = Self.routes[key] {
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200,
-                                           httpVersion: "HTTP/1.1", headerFields: nil)!
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200,
+                httpVersion: "HTTP/1.1", headerFields: nil)!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)

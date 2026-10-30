@@ -1,14 +1,17 @@
 import Foundation
 import Testing
+
 @testable import SmartTubeIOSCore
 
 // MARK: - Helpers
 
-/// Yields control enough times so internal @MainActor Tasks spawned by
-/// the ViewModel can complete against an immediately-returning mock API.
-private func waitForSubsTasks() async {
-    for _ in 0..<3 { await Task.yield() }
-    try? await Task.sleep(for: .milliseconds(50))
+/// Wait for the actual mock-backed result, not a guessed scheduling delay.
+@MainActor
+private func waitForSubsTasks(until ready: () -> Bool) async {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !ready(), ContinuousClock.now < deadline {
+        await Task.yield()
+    }
 }
 
 // MARK: - SubscriptionsSortTests
@@ -20,12 +23,15 @@ struct SubscriptionsSortTests {
     /// Subscriptions videos must be sorted newest-first by publishedAt.
     /// Verifies the sort that fetchSubscriptions() applies after parseVideoGroup().
     @Test func subscriptionVideosSortedNewestFirst() {
-        let older = Video(id: "old", title: "Older", channelTitle: "Ch",
-                          publishedAt: Date(timeIntervalSinceReferenceDate: 1000))
-        let newer = Video(id: "new", title: "Newer", channelTitle: "Ch",
-                          publishedAt: Date(timeIntervalSinceReferenceDate: 2000))
-        let oldest = Video(id: "oldest", title: "Oldest", channelTitle: "Ch",
-                           publishedAt: Date(timeIntervalSinceReferenceDate: 500))
+        let older = Video(
+            id: "old", title: "Older", channelTitle: "Ch",
+            publishedAt: Date(timeIntervalSinceReferenceDate: 1000))
+        let newer = Video(
+            id: "new", title: "Newer", channelTitle: "Ch",
+            publishedAt: Date(timeIntervalSinceReferenceDate: 2000))
+        let oldest = Video(
+            id: "oldest", title: "Oldest", channelTitle: "Ch",
+            publishedAt: Date(timeIntervalSinceReferenceDate: 500))
 
         var group = VideoGroup(title: "Subscriptions", videos: [older, newer, oldest].shuffled())
         group.videos.sort { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) }
@@ -37,10 +43,12 @@ struct SubscriptionsSortTests {
 
     /// Videos without a publishedAt date sort to the end (distantPast fallback).
     @Test func videosWithoutPublishedAtSortToEnd() {
-        let withDate = Video(id: "dated", title: "Dated", channelTitle: "Ch",
-                             publishedAt: Date(timeIntervalSinceReferenceDate: 1000))
-        let withoutDate = Video(id: "undated", title: "Undated", channelTitle: "Ch",
-                                publishedAt: nil)
+        let withDate = Video(
+            id: "dated", title: "Dated", channelTitle: "Ch",
+            publishedAt: Date(timeIntervalSinceReferenceDate: 1000))
+        let withoutDate = Video(
+            id: "undated", title: "Undated", channelTitle: "Ch",
+            publishedAt: nil)
 
         var videos = [withoutDate, withDate]
         videos.sort { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) }
@@ -71,16 +79,20 @@ struct SubscriptionsSortTests {
     /// is jarring mid-scroll (videos jump to a different position). Page 2 may contain
     /// videos that are newer than some of page 1's videos, but they must still land
     /// at the end of the list, not interleaved.
-    @Test func paginatedSubscriptionsAppendNewVideosAtBottomWithoutResort() async {
+    @Test func paginatedSubscriptionsAppendNewVideosAtBottomWithoutResort() async throws {
         let now = Date()
-        let vidToday = Video(id: "today", title: "Today",   channelTitle: "Ch",
-                             publishedAt: now)
-        let vid4D    = Video(id: "4d",    title: "4 days",  channelTitle: "Ch",
-                             publishedAt: now.addingTimeInterval(-4 * 86_400))
-        let vid2D    = Video(id: "2d",    title: "2 days",  channelTitle: "Ch",
-                             publishedAt: now.addingTimeInterval(-2 * 86_400))
-        let vid1D    = Video(id: "1d",    title: "1 day",   channelTitle: "Ch",
-                             publishedAt: now.addingTimeInterval(-1 * 86_400))
+        let vidToday = Video(
+            id: "today", title: "Today", channelTitle: "Ch",
+            publishedAt: now)
+        let vid4D = Video(
+            id: "4d", title: "4 days", channelTitle: "Ch",
+            publishedAt: now.addingTimeInterval(-4 * 86_400))
+        let vid2D = Video(
+            id: "2d", title: "2 days", channelTitle: "Ch",
+            publishedAt: now.addingTimeInterval(-2 * 86_400))
+        let vid1D = Video(
+            id: "1d", title: "1 day", channelTitle: "Ch",
+            publishedAt: now.addingTimeInterval(-1 * 86_400))
 
         // Page 1: today and 4 days ago (sorted newest-first as API returns them)
         let mock = MockInnerTubeAPI()
@@ -93,10 +105,10 @@ struct SubscriptionsSortTests {
         let section = BrowseSection(id: "subscriptions", title: "Subscriptions", type: .subscriptions)
         let vm = BrowseViewModel(api: mock, initialSection: section)
         await vm.updateAuthToken("fake-token")
-        vm.loadContent(for: section, refresh: true, source: "test")
-        await waitForSubsTasks()
+        await waitForSubsTasks(until: { vm.videoGroups.first?.videos.count == 2 && !vm.isLoading })
 
-        #expect(vm.videoGroups[0].videos.count == 2, "page 1 should load 2 videos")
+        let page1 = try #require(vm.videoGroups.first, "page 1 should load")
+        try #require(page1.videos.count == 2, "page 1 should load 2 videos")
 
         // Page 2: 2 days ago and 1 day ago — newer than "4d" but must still be appended
         // after it, not interleaved between "today" and "4d".
@@ -107,17 +119,13 @@ struct SubscriptionsSortTests {
         )
 
         // Trigger pagination using the last (oldest) video from page 1.
-        let lastOfPage1 = vm.videoGroups[0].videos.last!
+        let lastOfPage1 = try #require(page1.videos.last)
         vm.loadMoreIfNeeded(lastVideo: lastOfPage1)
-        await waitForSubsTasks()
+        await waitForSubsTasks(until: { vm.videoGroups.first?.videos.count == 4 })
 
-        let merged = vm.videoGroups[0].videos
+        let merged = try #require(vm.videoGroups.first).videos
         #expect(merged.count == 4, "all 4 videos should be present after merge")
-        // Page 1's order is preserved, page 2's videos are appended at the bottom
-        // in the order the API returned them.
-        #expect(merged[0].id == "today")
-        #expect(merged[1].id == "4d")
-        #expect(merged[2].id == "2d")
-        #expect(merged[3].id == "1d")
+        // Page 1's order is preserved, page 2's videos are appended at the bottom.
+        #expect(merged.map(\.id) == ["today", "4d", "2d", "1d"])
     }
 }

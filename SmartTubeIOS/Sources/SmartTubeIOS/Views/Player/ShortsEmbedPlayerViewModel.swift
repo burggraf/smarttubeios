@@ -35,6 +35,11 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     /// Non-nil when the player encounters an error that requires falling back
     /// (e.g. auto-advancing to the next Short — see Task 9).
     var playerError: TOSPlayerError? = nil
+    /// True while this VM is loading a Short in the background for pre-warming.
+    /// Suppresses Darwin notifications and auto-unmute so the standby WKWebView
+    /// doesn't produce audible output or confuse active-VM observers.
+    /// Cleared by `activate()` when the standby is promoted to the active slot.
+    private(set) var isStandby: Bool = false
 
     // MARK: - View State
     //
@@ -47,6 +52,19 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     var videoEnded: Bool = false
     var wasPlayingBeforeSuspend: Bool = false
     var controlsTimer: Task<Void, Never>?
+    /// Tracks `pause()`'s in-flight `webView.pauseAllMediaPlayback()` call, which can
+    /// take a noticeable amount of time to actually execute inside WebKit's WebContent
+    /// process. Without tracking it, a `play()` issued shortly after a `pause()` races
+    /// against this delayed call — the video visibly resumes, then the stale
+    /// `pauseAllMediaPlayback()` finally lands and pauses it again ~0.2-0.3s later,
+    /// with no corresponding `togglePlayPause()` call (confirmed via live device log).
+    /// `play()` awaits this before issuing its own play command so the two can never
+    /// race out of order.
+    private var pauseAllMediaTask: Task<Void, Never>?
+    /// Incremented on every `play()`/`pause()` call. `play()`'s post-resume
+    /// verification (see below) checks this hasn't changed before re-asserting
+    /// playback, so it never overrides a more recent, deliberate pause.
+    private var playPauseEpoch: Int = 0
     /// Cancelled once "ready" arrives for the in-flight `loadShort` (see
     /// ShortsEmbedPlayerViewModel+WebBridge.swift's "ready" case); if it fires
     /// first, `playerError` is set to `.webViewLoadFailed` so the new `advanceAfterError()`
@@ -82,7 +100,7 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     func setSleepTimer(minutes: Int?) {
         sleepTimer.setSleepTimer(minutes: minutes) { [weak self] in
             self?.pause()
-            shortsLog.notice("[sleepTimer] fired — pausing playback")
+            shortsLog.notice("[\(self?.logTag ?? "vm?", privacy: .public)] [sleepTimer] fired — pausing playback")
         }
     }
 
@@ -101,6 +119,13 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     // MARK: - Internal
 
     let webView: WKWebView
+    /// Distinguishes concurrent VM instances (active + standby) in the shared
+    /// `shortsLog` stream — every prior debugging session lost time correlating
+    /// which of two simultaneously-running VMs produced a given log line. See #275.
+    let instanceId: Int
+    private static var nextInstanceId = 0
+    /// Short tag prefixed onto every log line — e.g. "vm3" or "vm3/standby".
+    var logTag: String { "vm\(instanceId)\(isStandby ? "/standby" : "")" }
     /// Set by `loadShort(video:)`. Read by Task 6's `fetchSponsorSegments()` and
     /// Task 7's watch-history tracking — hence `private(set)`, not `private`.
     private(set) var videoId: String = ""
@@ -133,6 +158,8 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     init(api: InnerTubeAPI) {
         self.api = api
         self.tracker = WatchtimeTracker(api: api)
+        ShortsEmbedPlayerViewModel.nextInstanceId += 1
+        self.instanceId = ShortsEmbedPlayerViewModel.nextInstanceId
 
         let config = WKWebViewConfiguration()
         config.mediaTypesRequiringUserActionForPlayback = []
@@ -147,31 +174,50 @@ final class ShortsEmbedPlayerViewModel: NSObject {
         let proxyHandler = ShortsScriptMessageProxy()
         contentController.add(proxyHandler, contentWorld: .page, name: "ytCallback")
 
-        contentController.addUserScript(WKUserScript(
-            source: ShortsEmbedJS.webkitHiderJS,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false,
-            in: .page
-        ))
-        contentController.addUserScript(WKUserScript(
-            source: ShortsEmbedJS.playerControlsHiderJS,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false,
-            in: .page
-        ))
-        contentController.addUserScript(WKUserScript(
-            source: ShortsEmbedJS.stateDetectionJS,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false,
-            in: .page
-        ))
+        contentController.addUserScript(
+            WKUserScript(
+                source: ShortsEmbedJS.webkitHiderJS,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false,
+                in: .page
+            ))
+        contentController.addUserScript(
+            WKUserScript(
+                source: ShortsEmbedJS.playerControlsHiderJS,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false,
+                in: .page
+            ))
+        contentController.addUserScript(
+            WKUserScript(
+                source: ShortsEmbedJS.stateDetectionJS,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false,
+                in: .page
+            ))
         config.userContentController = contentController
 
         self.webView = WKWebView(frame: .zero, configuration: config)
+        // TV User-Agent so YouTube serves the TV player variant — same reason
+        // as TOSPlayerViewModel.swift. The TV variant uses the YouTube TV API
+        // for its auth check, which authenticates against the TV session
+        // cookies (TVFAS etc.) that the TV device-code sign-in flow sets. The
+        // web variant needs a YouTube WEB session (SAPISID) which the TV flow
+        // can't produce. See AuthService+YouTubeCookies.swift for the
+        // Multilogin 403 INVALID_TOKENS root cause.
+        self.webView.customUserAgent =
+            "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) " + "AppleWebKit/537.36 (KHTML, like Gecko) "
+            + "SamsungBrowser/2.1 Chrome/56.0.2924.0 TV Safari/537.36"
         #if os(iOS)
-        self.webView.isOpaque = false
-        self.webView.backgroundColor = .clear
-        self.webView.scrollView.backgroundColor = .clear
+        // isOpaque=false forces WebKit into software compositing, which silently
+        // disables the hardware-accelerated <video> layer — the JS bridge still
+        // reports ready/playing correctly (that's all JS-driven), but no video
+        // frames ever reach the screen, just a black rect. Mirrors
+        // TOSPlayerViewModel.swift:282-284 (the working regular-video pipeline),
+        // which has always used isOpaque=true/.black. See #275.
+        self.webView.isOpaque = true
+        self.webView.backgroundColor = .black
+        self.webView.scrollView.backgroundColor = .black
         #endif
 
         super.init()
@@ -238,10 +284,61 @@ final class ShortsEmbedPlayerViewModel: NSObject {
             swapEmbed(to: video.id)
         } else {
             hasStarted = true
-            startEmbed(videoId: video.id)
+            // Sync YouTube cookies from HTTPCookieStorage → WKWebsiteDataStore
+            // BEFORE startEmbed's loadHTMLString. Mirrors TOSPlayerViewModel's
+            // startIfNeeded fix (same root cause — see TOSPlayerViewModel.swift
+            // doc comment for syncYouTubeCookiesIntoWKWebView).
+            Task { @MainActor in
+                await self.syncYouTubeCookiesIntoWKWebView()
+                self.startEmbed(videoId: video.id)
+            }
         }
 
         startReadyTimeout(for: video.id)
+    }
+
+    /// Loads `video` into this VM's WKWebView in standby (pre-warm) mode.
+    /// The video initialises and reaches the "ready" state, but is immediately
+    /// paused and never unmuted — no audible output occurs.
+    /// Awaits `isReady` or a terminal `playerError` before returning, so the
+    /// caller can check `isReady` synchronously after the call.
+    func loadShortAsStandby(video: Video) async {
+        isStandby = true
+        loadShort(video: video)
+        while !isReady && playerError == nil {
+            if Task.isCancelled { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    /// Promotes this VM to active: clears the standby flag and begins playback.
+    /// Call after swapping this VM into the active `vm` slot — either a fresh
+    /// forward standby (#272) or a cached `previousVM` being resumed after a
+    /// backward swipe (#277).
+    ///
+    /// The "ready" Darwin notification is posted here rather than relying on a
+    /// fresh JS message — "ready" only fires once per page load, and for a
+    /// forward standby it already fired (suppressed) while in standby mode, so
+    /// no second one is coming.
+    ///
+    /// `hasReceivedFirstTick` is reset here unconditionally. It's a one-shot
+    /// gate ("has this VM ever ticked") that a fresh forward standby naturally
+    /// starts at `false` — but `previousVM` is the SAME instance that was
+    /// already active before being retired, so its first tick already fired
+    /// and the flag is permanently `true` without this reset. Left unreset, the
+    /// "tickstarted" Darwin notification (and downstream UI relying on it)
+    /// would never refire on a backward swipe — confirmed via
+    /// `ShortsEmbedPlayerUITests.testSwipingBackwardAlsoRefiresJSBridge`. The
+    /// reset is a harmless no-op for the forward case, where it's already false.
+    func activate() {
+        isStandby = false
+        hasReceivedFirstTick = false
+        play()
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("com.void.smarttube.shortsplayer.ready" as CFString),
+            nil, nil, true
+        )
     }
 
     /// First-ever load for this session — loads the HTML wrapper page via
@@ -253,13 +350,49 @@ final class ShortsEmbedPlayerViewModel: NSObject {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            shortsLog.error("[audioSession] setActive(true) failed: \(error.localizedDescription, privacy: .public)")
+            shortsLog.error(
+                "[\(self.logTag, privacy: .public)] [audioSession] setActive(true) failed: \(error.localizedDescription, privacy: .public)"
+            )
         }
         #endif
+        // Cookie sync happens in loadShort (the await syncYouTubeCookies runs
+        // BEFORE this method is called). See TOSPlayerViewModel.swift doc
+        // comment for syncYouTubeCookiesIntoWKWebView for the root cause.
         let url = ShortsEmbedURL.embedURL(videoId: videoId)
         let html = ShortsEmbedURL.htmlWrapper(embedURL: url)
-        shortsLog.notice("[loadShort] initial load — videoId=\(videoId, privacy: .public)")
+        shortsLog.notice(
+            "[\(self.logTag, privacy: .public)] [loadShort] initial load — videoId=\(videoId, privacy: .public)")
         webView.loadHTMLString(html, baseURL: URL(string: "https://www.example.com")!)
+    }
+
+    /// Sync YouTube session cookies from HTTPCookieStorage.shared into
+    /// WKWebsiteDataStore.default(). See TOSPlayerViewModel.syncYouTubeCookiesIntoWKWebView
+    /// for the full root-cause story — the same bug applies here.
+    private func syncYouTubeCookiesIntoWKWebView() async {
+        let yt = URL(string: "https://www.youtube.com")!
+        let google = URL(string: "https://www.google.com")!
+        let cookies =
+            (HTTPCookieStorage.shared.cookies(for: yt) ?? []) + (HTTPCookieStorage.shared.cookies(for: google) ?? [])
+        guard !cookies.isEmpty else {
+            shortsLog.notice(
+                "[\(self.logTag, privacy: .public)] [loadShort] no youtube/google cookies in HTTPCookieStorage — IFrame will run unauthenticated"
+            )
+            return
+        }
+        let names = cookies.map { "\($0.name)@\($0.domain)" }.joined(separator: " ")
+        shortsLog.notice(
+            "[\(self.logTag, privacy: .public)] [loadShort] copying \(cookies.count) cookies → WKWebsiteDataStore: \(names as NSString)"
+        )
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let group = DispatchGroup()
+            for cookie in cookies {
+                group.enter()
+                store.setCookie(cookie) { group.leave() }
+            }
+            group.notify(queue: .main) { cont.resume() }
+        }
+        shortsLog.notice("[\(self.logTag, privacy: .public)] [loadShort] cookie sync done")
     }
 
     /// Every load after the first — swaps the already-loaded `<iframe id="yt">`'s
@@ -267,7 +400,8 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     /// Task 1's `ShortsEmbedSrcSwapSpikeViewModel.swapToNextVideo()`.
     private func swapEmbed(to videoId: String) {
         let url = ShortsEmbedURL.embedURL(videoId: videoId)
-        shortsLog.notice("[loadShort] src swap — videoId=\(videoId, privacy: .public)")
+        shortsLog.notice(
+            "[\(self.logTag, privacy: .public)] [loadShort] src swap — videoId=\(videoId, privacy: .public)")
         eval("swap", "document.getElementById('yt').src = '\(url.absoluteString)';")
     }
 
@@ -283,7 +417,9 @@ final class ShortsEmbedPlayerViewModel: NSObject {
             try? await Task.sleep(for: .seconds(9))
             guard let self, !Task.isCancelled else { return }
             guard self.videoId == videoId, !self.isReady else { return }
-            shortsLog.notice("[loadShort] ready TIMEOUT — videoId=\(videoId, privacy: .public) after 9s")
+            shortsLog.notice(
+                "[\(self.logTag, privacy: .public)] [loadShort] ready TIMEOUT — videoId=\(videoId, privacy: .public) after 9s"
+            )
             self.playerError = .webViewLoadFailed
         }
     }
@@ -294,7 +430,32 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     // `embedFrameInfo`'s doc comment for why frame-targeting is required.
 
     func play() {
-        eval("play", "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.play();}return {found: !!v, iframes: ifr, paused: v ? v.paused : null};})();")
+        playPauseEpoch &+= 1
+        let myEpoch = playPauseEpoch
+        // Wait for any in-flight pauseAllMediaPlayback() (from a just-prior pause())
+        // to actually land first — otherwise it can resolve after this play() and
+        // re-pause the video out from under it. See pauseAllMediaTask's doc comment.
+        let priorPause = pauseAllMediaTask
+        Task { [weak self] in
+            await priorPause?.value
+            guard let self, self.playPauseEpoch == myEpoch else { return }
+            self.eval(
+                "play",
+                "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.play();}return {found: !!v, iframes: ifr, paused: v ? v.paused : null};})();"
+            )
+            // Defense-in-depth: even after awaiting the prior pause, a late-landing
+            // pause from some other source (e.g. WebKit's own stall handling) can
+            // still clobber this resume a few hundred ms later — exactly the "plays
+            // then re-pauses" symptom confirmed via live device log. Verify shortly
+            // after that playback actually stuck, and re-assert if not — but only if
+            // nothing more recent (a deliberate pause or another play) has happened.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, self.playPauseEpoch == myEpoch else { return }
+            self.eval(
+                "verifyPlay",
+                "(function(){var v=document.querySelector('video');if(v&&v.paused){v.play();}return {paused: v?v.paused:null};})();"
+            )
+        }
     }
 
     /// Stops playback — including audio — regardless of which frame the `<video>`
@@ -302,7 +463,9 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     /// (TOSPlayerViewModel.swift:296-324) for the cross-origin-iframe root cause this
     /// works around.
     func pause() {
-        Task {
+        playPauseEpoch &+= 1
+        pauseAllMediaTask = Task { [weak self] in
+            guard let self else { return }
             await self.webView.pauseAllMediaPlayback()
             CFNotificationCenterPostNotification(
                 CFNotificationCenterGetDarwinNotifyCenter(),
@@ -310,11 +473,17 @@ final class ShortsEmbedPlayerViewModel: NSObject {
                 nil, nil, true
             )
         }
-        eval("pause", "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.pause();}return {found: !!v, iframes: ifr, paused: v ? v.paused : null};})();")
+        eval(
+            "pause",
+            "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.pause();}return {found: !!v, iframes: ifr, paused: v ? v.paused : null};})();"
+        )
     }
 
     func seekTo(_ seconds: Double) {
-        eval("seekTo(\(seconds))", "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.currentTime=\(seconds);}return {found: !!v, iframes: ifr, currentTime: v ? v.currentTime : null};})();")
+        eval(
+            "seekTo(\(seconds))",
+            "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.currentTime=\(seconds);}return {found: !!v, iframes: ifr, currentTime: v ? v.currentTime : null};})();"
+        )
     }
 
     /// Shows the native `<video controls>` UI inside the embed iframe (play/pause,
@@ -332,7 +501,10 @@ final class ShortsEmbedPlayerViewModel: NSObject {
     }
 
     func setPlaybackRate(_ rate: Double) {
-        eval("setPlaybackRate(\(rate))", "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.playbackRate=\(rate);}return {found: !!v, iframes: ifr, playbackRate: v ? v.playbackRate : null};})();")
+        eval(
+            "setPlaybackRate(\(rate))",
+            "(function(){var v=document.querySelector('video');var ifr=document.querySelectorAll('iframe').length;if(v){v.playbackRate=\(rate);}return {found: !!v, iframes: ifr, playbackRate: v ? v.playbackRate : null};})();"
+        )
     }
 
     // MARK: - Private helpers
@@ -343,9 +515,13 @@ final class ShortsEmbedPlayerViewModel: NSObject {
         webView.evaluateJavaScript(js, in: embedFrameInfo, in: .page) { result in
             switch result {
             case .success(let value):
-                shortsLog.notice("[eval] \(label, privacy: .public) result: \(String(describing: value), privacy: .public)")
+                shortsLog.notice(
+                    "[\(self.logTag, privacy: .public)] [eval] \(label, privacy: .public) result: \(String(describing: value), privacy: .public)"
+                )
             case .failure(let error):
-                shortsLog.notice("[eval] \(label, privacy: .public) ERROR: \(String(describing: error), privacy: .public)")
+                shortsLog.notice(
+                    "[\(self.logTag, privacy: .public)] [eval] \(label, privacy: .public) ERROR: \(String(describing: error), privacy: .public)"
+                )
             }
         }
     }

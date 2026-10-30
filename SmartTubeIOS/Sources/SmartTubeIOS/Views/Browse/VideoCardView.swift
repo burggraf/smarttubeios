@@ -1,9 +1,9 @@
-import SwiftUI
 import SmartTubeIOSCore
+import SwiftUI
 import os
 
 private let focusLog = Logger(subsystem: "com.smarttube", category: "focus")
-private let feedLog  = Logger(subsystem: "com.smarttube", category: "feed")
+private let feedLog = Logger(subsystem: "com.smarttube", category: "feed")
 
 // MARK: - Notification names
 
@@ -36,12 +36,18 @@ public struct VideoCardView: View {
     @Environment(AuthService.self) private var authService
     @Environment(SettingsStore.self) private var store
     @Environment(\.innerTubeAPI) private var api
+    #if os(iOS)
+    @Environment(PlayerRouter.self) private var playerRouter
+    #endif
     @State private var localProgress: Double?
     @State private var watchLaterAlert: DownloadAlertItem?
+    @State private var playlistPickerMode: PlaylistPickerSheet.Mode?
     /// Index into `video.thumbnailFallbackURLs`. -1 = use primary `thumbnailURL`.
     @State private var thumbnailFallbackIndex: Int = -1
     #if !os(tvOS)
+    #if ENABLE_DOWNLOADS
     @Environment(VideoDownloadService.self) private var downloadService
+    #endif
     #endif
     #if os(tvOS)
     @FocusState private var isFocused: Bool
@@ -49,6 +55,14 @@ public struct VideoCardView: View {
 
     private var effectiveProgress: Double? {
         localProgress ?? video.watchProgress
+    }
+
+    /// #125: falls back to `video.playlistId` when the caller doesn't explicitly pass
+    /// `currentPlaylistId` (e.g. the "Watch Later" home tab, which renders through the
+    /// generic BrowseView grid that has no per-card playlist context of its own) — lets
+    /// Remove/Move-to-Playlist actions work there too, not just from PlaylistView.
+    private var effectivePlaylistId: String? {
+        currentPlaylistId ?? video.playlistId
     }
 
     public init(video: Video, compact: Bool = false, currentPlaylistId: String? = nil, onSelect: (() -> Void)? = nil) {
@@ -92,80 +106,55 @@ public struct VideoCardView: View {
             // total — not per-card.
             #if canImport(WebKit)
             await BotGuardWebViewRunner.shared.prepare()
-            #endif
-            // fix14/fix18: Pre-warm WKWebView HLS extraction for this card.
-            // Shorts excluded (no youtubei/v1/player → 40 s timeout).
-            // fix18: Loop with 4 s back-off until the URL is cached or the task is
-            // cancelled. A single retry was not enough when the first card's cold
-            // extraction held isPreWarming=true for ~40 s — the second card's task
-            // would exhaust its one retry and end, leaving nobody to call preWarm
-            // once the extractor became idle. With the loop, each card re-attempts
-            // every 4 s until it succeeds, regardless of how long the cold extraction
-            // takes. fix17 (persistent WKWebView) means the 2nd+ extractions only
-            // take ~2.5 s (warm), so the total wait is cold_time + ≤4 s + 2.5 s.
-            #if canImport(WebKit)
-            if !video.isShort {
+            // iOS uses TOS player (WKWebView embed) by default — HLS URLs are never
+            // consumed there, so pre-warming the HLS extractor is pure waste and the
+            // primary source of the SlowLoad NON_FATAL (4497ms per card on scroll).
+            // Mac/tvOS still use AVPlayer and need the pre-warm.
+            #if !os(iOS)
+            if !video.isShort
+                && YouTubeWebViewHLSExtractor.activePreWarmLoops < YouTubeWebViewHLSExtractor.maxPreWarmLoops
+            {
+                YouTubeWebViewHLSExtractor.activePreWarmLoops += 1
+                defer { YouTubeWebViewHLSExtractor.activePreWarmLoops -= 1 }
                 let videoId = video.id
-                // fix19: heartbeat loop — after the URL is cached, fire the video-ID-specific
-                // Darwin notification every 3 s so the regression test's
-                // XCTDarwinNotificationExpectation always catches a fire even if the initial
-                // one-shot fire from preWarm() happened before the test registered its
-                // expectation. The outer loop re-calls preWarm() when stop() evicts the cache.
                 outer: while !Task.isCancelled {
-                    // Only call preWarm if URL is not already cached (avoids redundant extractions).
                     if await VideoPreloadCache.shared.cachedWKHLSURL(for: videoId) == nil {
                         await YouTubeWebViewHLSExtractor.preWarm(videoId: videoId)
                     }
-                    // fix26b: For videos without WKWebView pot=, earlyTask (started at tap
-                    // time) calls extractHLSURL → wv.load() which INVALIDATES the preWarm
-                    // CDN session, causing CDN -12660 on segments in Phase -1a.
-                    //
-                    // Fix: run a second serialExtract here to establish a fresh CDN session.
-                    // Hold isPreWarming=true during this extraction so no concurrent card
-                    // preWarm can navigate WKWebView and invalidate the new session.
-                    // LoadAsync earlyTask checks isWKHLSURLFresh(within:5) — if true it
-                    // returns the cached URL WITHOUT calling serialExtract (no wv.load()
-                    // → CDN session stays active). The heartbeat fires ONLY after this
-                    // extraction, so the test always taps into a live CDN session.
-                    // For videos WITH pot=, pot= provides durable CDN auth → skip this.
                     let hasCachedURL = await VideoPreloadCache.shared.cachedWKHLSURL(for: videoId) != nil
                     let hasCachedPot = await VideoPreloadCache.shared.cachedPoToken(for: videoId) != nil
                     if hasCachedURL && !hasCachedPot && !YouTubeWebViewHLSExtractor.isPreWarming {
                         YouTubeWebViewHLSExtractor.isPreWarming = true
                         if let freshURL = await YouTubeWebViewHLSExtractor.shared.serialExtract(videoId: videoId) {
                             let freshPot = YouTubeWebViewHLSExtractor.shared.extractedPoToken
-                            await VideoPreloadCache.shared.store(wkHLSManifestURL: freshURL, for: videoId, isPreWarm: true)
+                            await VideoPreloadCache.shared.store(
+                                wkHLSManifestURL: freshURL, for: videoId, isPreWarm: true)
                             if let pot = freshPot {
                                 await VideoPreloadCache.shared.store(wkHLSPoToken: pot, for: videoId)
                             }
                         }
                         YouTubeWebViewHLSExtractor.isPreWarming = false
                     }
-                    // Inner heartbeat: fire prewarm.done.<videoId> every 3 s while cached.
-                    // The test registers its expectation AFTER finding the card in the UI
-                    // (potentially after the initial fire). 3 s cadence guarantees a catch.
-                    while !Task.isCancelled {
-                        guard await VideoPreloadCache.shared.cachedWKHLSURL(for: videoId) != nil else {
-                            break  // cache evicted by stop() — restart outer to re-preWarm
-                        }
-                        CFNotificationCenterPostNotification(
-                            CFNotificationCenterGetDarwinNotifyCenter(),
-                            CFNotificationName("com.void.smarttube.player.prewarm.done.\(videoId)" as CFString),
-                            nil, nil, true
-                        )
-                        do {
-                            try await Task.sleep(nanoseconds: 3_000_000_000)
-                        } catch {
-                            break outer  // task cancelled
-                        }
+                    CFNotificationCenterPostNotification(
+                        CFNotificationCenterGetDarwinNotifyCenter(),
+                        CFNotificationName("com.void.smarttube.player.prewarm.done.\(videoId)" as CFString),
+                        nil, nil, true
+                    )
+                    do {
+                        try await Task.sleep(nanoseconds: 30_000_000_000)
+                    } catch {
+                        break outer
                     }
+                    let stillCached = await VideoPreloadCache.shared.cachedWKHLSURL(for: videoId) != nil
+                    if stillCached { break outer }
                 }
             }
+            #endif
             #endif
         }
         .contextMenu {
             #if !os(tvOS)
-            if let shareURL = URL(string: "https://www.youtube.com/watch?v=\(video.id)") {
+            if let shareURL = video.shareURL {
                 ShareLink(item: shareURL) {
                     Label("Share", systemImage: AppSymbol.share)
                 }
@@ -183,14 +172,35 @@ public struct VideoCardView: View {
                 }
             }
             if authService.isSignedIn {
-                if currentPlaylistId == "WL" {
+                if effectivePlaylistId == "WL" {
                     Button(role: .destructive) {
+                        // Removal is keyed by setVideoId (the playlist-entry token), not the
+                        // video ID — see InnerTubeAPI+Social.swift's removeFromWatchLater (#122).
+                        // It's only populated when this card came from browsing the WL playlist
+                        // itself, which is the only place this button is shown.
+                        // A video saved this session may be listed before YouTube indexed it,
+                        // without its own token; use the one returned when it was saved.
+                        guard
+                            let setVideoId = video.setVideoId
+                                ?? WatchLaterMembershipStore.shared.setVideoId(for: video.id)
+                        else {
+                            watchLaterAlert = DownloadAlertItem(
+                                title: String(localized: "Could Not Remove", bundle: .module),
+                                message: String(
+                                    localized: "Missing playlist entry information for \"\(video.title)\".",
+                                    bundle: .module)
+                            )
+                            return
+                        }
                         Task {
                             do {
-                                try await api.removeFromWatchLater(videoId: video.id)
+                                try await api.removeFromWatchLater(setVideoId: setVideoId)
+                                WatchLaterMembershipStore.shared.markRemoved(video.id)
                                 watchLaterAlert = DownloadAlertItem(
                                     title: String(localized: "Removed from Watch Later", bundle: .module),
-                                    message: String(localized: "\"\(video.title)\" was removed from your Watch Later playlist.", bundle: .module)
+                                    message: String(
+                                        localized: "\"\(video.title)\" was removed from your Watch Later playlist.",
+                                        bundle: .module)
                                 )
                             } catch {
                                 watchLaterAlert = DownloadAlertItem(
@@ -206,10 +216,13 @@ public struct VideoCardView: View {
                     Button {
                         Task {
                             do {
-                                try await api.addToWatchLater(videoId: video.id)
+                                let setVideoId = try await api.addToWatchLater(videoId: video.id)
+                                WatchLaterMembershipStore.shared.markSaved(video, setVideoId: setVideoId)
                                 watchLaterAlert = DownloadAlertItem(
                                     title: String(localized: "Saved to Watch Later", bundle: .module),
-                                    message: String(localized: "\"\(video.title)\" was added to your Watch Later playlist.", bundle: .module)
+                                    message: String(
+                                        localized: "\"\(video.title)\" was added to your Watch Later playlist.",
+                                        bundle: .module)
                                 )
                             } catch {
                                 watchLaterAlert = DownloadAlertItem(
@@ -220,6 +233,18 @@ public struct VideoCardView: View {
                         }
                     } label: {
                         Label("Save to Watch Later", systemImage: AppSymbol.watchLater)
+                    }
+                }
+                Button {
+                    playlistPickerMode = .copy
+                } label: {
+                    Label("Copy to Playlist", systemImage: "rectangle.stack.badge.plus")
+                }
+                if effectivePlaylistId != nil {
+                    Button {
+                        playlistPickerMode = .move
+                    } label: {
+                        Label("Move to Playlist", systemImage: "arrow.right.circle")
                     }
                 }
             }
@@ -236,6 +261,13 @@ public struct VideoCardView: View {
             } label: {
                 Label("Play Next", systemImage: "text.insert")
             }
+            #if os(iOS)
+            Button {
+                playerRouter.open(video: video, api: api, incognito: true)
+            } label: {
+                Label("Play Incognito", systemImage: "eyeglasses")
+            }
+            #endif
             if authService.isSignedIn {
                 Button(role: .destructive) {
                     Task {
@@ -273,7 +305,7 @@ public struct VideoCardView: View {
                     }
                 }
             }
-            #if !os(tvOS)
+            #if !os(tvOS) && ENABLE_DOWNLOADS
             Button {
                 downloadService.download(video: video)
             } label: {
@@ -349,13 +381,41 @@ public struct VideoCardView: View {
             .alert(item: $watchLaterAlert) { item in
                 Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("OK")))
             }
+            .sheet(item: $playlistPickerMode) { mode in
+                PlaylistPickerSheet(
+                    mode: mode, video: video, sourcePlaylistId: effectivePlaylistId, api: api,
+                    onFinished: handlePlaylistPickerResult
+                )
+            }
         #else
         cardContent
             .onAppear { feedLog.info("[feed] id=\(self.video.id) title=\(self.video.title)") }
             .alert(item: $watchLaterAlert) { item in
                 Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("OK")))
             }
+            .sheet(item: $playlistPickerMode) { mode in
+                PlaylistPickerSheet(
+                    mode: mode, video: video, sourcePlaylistId: effectivePlaylistId, api: api,
+                    onFinished: handlePlaylistPickerResult
+                )
+            }
         #endif
+    }
+
+    private func handlePlaylistPickerResult(_ result: Result<PlaylistInfo, Error>) {
+        switch result {
+        case .success(let playlist):
+            watchLaterAlert = DownloadAlertItem(
+                title: String(localized: "Added to Playlist", bundle: .module),
+                message: String(
+                    localized: "\"\(video.title)\" was added to \"\(playlist.title)\".", bundle: .module)
+            )
+        case .failure(let error):
+            watchLaterAlert = DownloadAlertItem(
+                title: String(localized: "Could Not Update Playlist", bundle: .module),
+                message: error.localizedDescription
+            )
+        }
     }
 
     // MARK: Grid layout (default)
@@ -380,6 +440,9 @@ public struct VideoCardView: View {
                 }
                 .overlay(alignment: .topLeading) {
                     if video.isLive { liveBadge }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if WatchLaterMembershipStore.shared.contains(video.id) { watchLaterSavedBadge }
                 }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -409,6 +472,12 @@ public struct VideoCardView: View {
             }
             .padding(.horizontal, 2)
         }
+        // #153: without an explicit content shape, SwiftUI's default hit-test area for this
+        // compound view can leave gaps (the VStack spacing, padding) untappable — invisible on
+        // iOS/tvOS where touches are more forgiving, but very noticeable with a precise mouse
+        // pointer on macOS. The caller (VideoGridSection) attaches its whole-card tap gesture
+        // externally, so it needs this view's own hit-test region to cover its full frame.
+        .contentShape(Rectangle())
     }
 
     // MARK: Compact (list) layout
@@ -429,6 +498,9 @@ public struct VideoCardView: View {
                 }
                 .overlay(alignment: .bottomLeading) {
                     if let label = uploadDateLabel { durationBadge(label) }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if WatchLaterMembershipStore.shared.contains(video.id) { watchLaterSavedBadge }
                 }
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayTitle)
@@ -456,6 +528,7 @@ public struct VideoCardView: View {
             }
             Spacer(minLength: 0)
         }
+        .contentShape(Rectangle())  // #153: see gridLayout's doc comment
     }
 
     // MARK: Shared
@@ -463,7 +536,8 @@ public struct VideoCardView: View {
     /// Returns the DeArrow thumbnail URL if the feature is enabled and a timestamp is available.
     private var deArrowThumbnailURL: URL? {
         guard store.settings.deArrowEnabled,
-              let ts = video.deArrowThumbnailTimestamp else { return nil }
+            let ts = video.deArrowThumbnailTimestamp
+        else { return nil }
         return URL(string: "https://i.ytimg.com/vi/\(video.id)/\(Int(ts)).jpg")
     }
 
@@ -479,13 +553,22 @@ public struct VideoCardView: View {
             systemPlaylistThumbnail
         } else {
             // Walk a fallback chain on each successive failure:
-            //   -1 → deArrowThumbnailURL (community thumbnail) or thumbnailURL (API-provided)
+            //   -1 → deArrowThumbnailURL (community thumbnail), else maxresdefault.jpg when
+            //        High Resolution is on, else thumbnailURL (API-provided)
+            //    (High Resolution only: hq720.jpg, then the standard chain below)
             //    0 → sddefault.jpg  (640×480, available for most videos)
             //    1 → hqdefault.jpg  (480×360, always available)
             //    2 → mqdefault.jpg  (320×180, always available — last resort)
-            let fallbacks = video.thumbnailFallbackURLs
-            let url: URL? = thumbnailFallbackIndex < 0
-                ? (deArrowThumbnailURL ?? video.thumbnailURL ?? fallbacks.first)
+            // High-res URLs are built from `/vi/<id>/`, so they only make sense for real
+            // videos: playlist placeholder cards (Playlists section: id == playlistId) would
+            // walk the whole chain against a playlist ID and end on a grey placeholder, and
+            // Shorts would swap their portrait thumbnail for a landscape one.
+            let highRes =
+                store.settings.highResThumbnails && video.playlistId != video.id && !video.isShort
+            let fallbacks = highRes ? video.highResThumbnailFallbackURLs : video.thumbnailFallbackURLs
+            let url: URL? =
+                thumbnailFallbackIndex < 0
+                ? (deArrowThumbnailURL ?? (highRes ? video.maxResThumbnailURL : video.thumbnailURL) ?? fallbacks.first)
                 : (thumbnailFallbackIndex < fallbacks.count ? fallbacks[thumbnailFallbackIndex] : nil)
             AsyncImage(url: url) { phase in
                 switch phase {
@@ -507,13 +590,8 @@ public struct VideoCardView: View {
                 // Reset so a reused card slot always tries the primary URL for the new video.
                 thumbnailFallbackIndex = -1
                 #if canImport(WebKit)
-                // iOS: card scrolled into viewport — pre-warm WKWebView HLS extraction so
-                // that if the user taps, the URL is already cached by the time exhaustiveRetry
-                // reaches Phase -1a, cutting cold-start time from ~3s to ~0.85s.
-                // Shorts excluded: their player never fires youtubei/v1/player (→ 40 s timeout).
-                // fix16: await BotGuard so SOCS cookie is in .default() data store.
-                // fix18: loop with 4 s back-off until URL cached (matches call site 1).
                 await BotGuardWebViewRunner.shared.prepare()
+                #if !os(iOS)
                 if !video.isShort {
                     let videoId = video.id
                     while !Task.isCancelled {
@@ -522,6 +600,7 @@ public struct VideoCardView: View {
                         try? await Task.sleep(nanoseconds: 4_000_000_000)
                     }
                 }
+                #endif
                 #endif
             }
         }
@@ -623,19 +702,35 @@ public struct VideoCardView: View {
             .clipShape(RoundedRectangle(cornerRadius: 3))
             .padding(4)
     }
+
+    /// #39: shown when this video was saved to Watch Later via this app. See
+    /// WatchLaterMembershipStore's doc comment for why this can't reflect Watch
+    /// Later state from other clients.
+    private var watchLaterSavedBadge: some View {
+        Image(systemName: "bookmark.fill")
+            .font(.caption2)
+            .padding(5)
+            .background(.black.opacity(0.75))
+            .foregroundStyle(.white)
+            .clipShape(Circle())
+            .padding(4)
+            .accessibilityLabel(Text("Saved to Watch Later", bundle: .module))
+    }
 }
 
 // MARK: - Preview
 
 #if DEBUG
 #Preview {
-    VideoCardView(video: Video(
-        id: "dQw4w9WgXcQ",
-        title: "Rick Astley – Never Gonna Give You Up",
-        channelTitle: "Rick Astley",
-        duration: 213,
-        viewCount: 1_400_000_000
-    ))
+    VideoCardView(
+        video: Video(
+            id: "dQw4w9WgXcQ",
+            title: "Rick Astley – Never Gonna Give You Up",
+            channelTitle: "Rick Astley",
+            duration: 213,
+            viewCount: 1_400_000_000
+        )
+    )
     .frame(width: 320)
     .padding()
 }

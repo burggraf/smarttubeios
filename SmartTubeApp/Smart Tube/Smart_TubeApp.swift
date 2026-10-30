@@ -1,7 +1,8 @@
-import SwiftUI
 import FirebaseCore
+import FirebaseCrashlytics
 import SmartTubeIOS
 import SmartTubeIOSCore
+import SwiftUI
 
 /// tvOS entry point for SmartTube.
 /// The device-code + QR sign-in flow is natively designed for Apple TV —
@@ -18,11 +19,18 @@ struct SmartTubeTVApp: App {
     /// tvOS (where downloads are disabled in UI). Must be present in the environment
     /// or SwiftUI throws a fatal "No Observable object of type VideoDownloadService"
     /// error at launch.
+    #if ENABLE_DOWNLOADS
     @State private var cardDownloadService: VideoDownloadService
+    #endif
 
     init() {
-        FirebaseApp.configure()
+        // #92: see AppEntry.swift's init() for why order matters here — settingsStore
+        // must exist before deciding whether to configure Firebase at all.
         let settingsStore = SettingsStore()
+        CrashlyticsLogger.isEnabled = !settingsStore.settings.disableAnalytics
+        if CrashlyticsLogger.isEnabled {
+            FirebaseApp.configure()
+        }
         let poTokenProvider: (any PoTokenProvider)? = {
             if let url = settingsStore.settings.poTokenServiceURL {
                 return ServerPoTokenProvider(serviceURL: url)
@@ -30,11 +38,13 @@ struct SmartTubeTVApp: App {
             return BotGuardClient()
         }()
         let api = InnerTubeAPI(authToken: nil, poTokenProvider: poTokenProvider)
-        _api                 = State(initialValue: api)
-        _authService         = State(initialValue: AuthService())
-        _browseViewModel     = State(initialValue: BrowseViewModel(api: api))
-        _settingsStore       = State(initialValue: settingsStore)
+        _api = State(initialValue: api)
+        _authService = State(initialValue: AuthService())
+        _browseViewModel = State(initialValue: BrowseViewModel(api: api))
+        _settingsStore = State(initialValue: settingsStore)
+        #if ENABLE_DOWNLOADS
         _cardDownloadService = State(initialValue: VideoDownloadService(api: api))
+        #endif
     }
 
     var body: some Scene {
@@ -44,7 +54,9 @@ struct SmartTubeTVApp: App {
                 .environment(browseViewModel)
                 .environment(settingsStore)
                 .environment(\.innerTubeAPI, api)
-                .environment(cardDownloadService)
+                #if ENABLE_DOWNLOADS
+            .environment(cardDownloadService)
+                #endif
                 .onChange(of: authService.accessToken, initial: true) { _, newToken in
                     Task {
                         await api.setAuthToken(newToken)
