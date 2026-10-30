@@ -174,7 +174,12 @@ public final class AuthService {
         guard !isSignedIn, accessToken == nil else { return }
         guard let pending = pendingActivation, pending.expiresAt > Date() else { return }
         guard let deviceCode = currentDeviceCode, let creds = currentCreds else { return }
-        authLog.notice("handleForeground() — restarting poll immediately")
+        // A token request may already have redeemed the approved device code while
+        // Safari was open. Cancelling it here can discard the token response; a
+        // replacement request then fails because that code has already been used.
+        // Let the existing task resume, and restart only a missing/cancelled poll.
+        if let pollTask, !pollTask.isCancelled { return }
+        authLog.notice("handleForeground() — restarting inactive poll immediately")
         pollTask?.cancel()
         let interval = currentInterval
         pollTask = Task { [weak self] in
